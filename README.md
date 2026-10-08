@@ -238,8 +238,10 @@ recorded `info` events (a delivery in an agent lane means the message
 verifiably entered that agent's context before the stated turn).
 
 The report renders an **Episode timeline** once per episode - every
-lane on one wall-clock axis, with model turns, deliveries, messages by
-channel and world actions - followed by the usual per-lane sections.
+lane on one wall-clock axis, with model turns coloured by judged phase,
+deliveries, messages by channel and world actions - followed by the
+usual per-lane sections (`decision_phases` segments each agent lane on
+its own, so phase timelines and cards are per agent).
 Inspect's log format already records concurrent agents this way;
 `multisect` (a sibling package) converts Krill runs into such logs.
 
@@ -594,6 +596,10 @@ Each `Layer` field is one surface, all optional:
   ready dataframe with your own data.
 - **section / tags / audit** - typed report blocks, phase-card
   chips plus the spend grouping, and an audit entity block.
+- **scope** - where the section renders on a multi-agent episode:
+  `"transcript"` (default, once per report unit as before), `"lane"`
+  (once per agent lane, the frame cut to that lane) or `"episode"`
+  (once, in the episode overview).
 
 > [!TIP]
 > The full authoring recipe is the shipped `add-a-layer` skill.

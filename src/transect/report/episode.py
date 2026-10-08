@@ -112,24 +112,23 @@ def episode_overview_section(
         f"episode-{abs(hash((t0.isoformat(), len(turns), len(points)))) % 10**8:08d}"
     )
     compression_note = (
-        f" Idle stretches with no activity in any lane for over {int(GAP_MIN_S)} "
-        "seconds are collapsed to a dashed gap captioned with their length; the "
-        "axis labels give the time since episode start at each position."
+        f" Idle stretches with no activity in any lane for over {int(GAP_MIN_S)} s "
+        "are collapsed to a dashed, captioned gap; axis labels are time since "
+        "episode start."
         if axis.gaps
-        else " Time is recorded wall clock."
+        else ""
     )
     intro = Markup(
-        "<p>Every top-level lane of this transcript on one wall-clock axis: "
-        "the world lane's channel messages (ticks, coloured by channel) and "
-        "world actions (dots), and each agent lane's model turns (boxes, "
-        "start to completion"
+        '<details class="how-to-read"><summary>how to read</summary><p>'
+        "Lanes are the world (channel messages as ticks coloured by channel, "
+        "world actions as dots) and each agent (model turns as boxes from start "
+        "to completion"
         + (", coloured by judged phase" if judged else "")
-        + ") with the deliveries that verifiably entered its context "
-        "(triangles)."
+        + "; deliveries into its context as triangles)."
         + compression_note
-        + " Scroll to zoom, drag to pan, double-click to reset; hover any "
-        "element for its detail; click a lane name to open that lane's "
-        "section.</p>"
+        + " Wheel to zoom, drag the plot to pan, drag the navigator thumb or its "
+        "handles below, double-click to reset. Lane names open their sections."
+        "</p></details>"
     )
     payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
     chart = Markup(

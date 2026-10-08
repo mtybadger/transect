@@ -59,9 +59,11 @@ details.transcript {{ scroll-margin-top: 3rem; }}  /* clear the sticky lane nav 
 details.transcript > summary {{ list-style: none; cursor: pointer; }}
 details.transcript > summary::-webkit-details-marker {{ display: none; }}
 details.transcript > summary h2 {{ display: inline-block; margin-top: 1.6rem; }}
-details.transcript > summary h2::before {{ content: "\25B8"; display: inline-block;
-  width: 1.1em; color: var(--transect-color-muted); font-size: 0.8em; }}
-details.transcript[open] > summary h2::before {{ content: "\25BE"; }}
+details.transcript > summary .unit-marker {{ display: inline-block; width: 0; height: 0;
+  margin: 0 0.6em 0.15em 0; border-left: 0.45em solid var(--transect-color-muted);
+  border-top: 0.3em solid transparent; border-bottom: 0.3em solid transparent;
+  vertical-align: middle; transition: transform 0.1s; }}
+details.transcript[open] > summary .unit-marker {{ transform: rotate(90deg); }}
 .lane-nav {{ position: sticky; top: 0; z-index: 20; background: #fff;
   border-bottom: 1px solid var(--transect-color-border); padding: 6px 0;
   margin: 0.5rem 0 1rem; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
@@ -83,8 +85,11 @@ iframe.transect-lazy {{ background: repeating-linear-gradient(135deg, #fafafa, #
   text-align: left; font-size: 0.75rem; }}
 .relmap td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 /* the episode chart */
-.episode-chart {{ position: relative; }}
+.episode-chart {{ position: relative; user-select: none; -webkit-user-select: none; }}
 .episode-chart svg {{ display: block; width: 100%; height: auto; cursor: grab; }}
+.how-to-read {{ font-size: 0.78rem; color: var(--transect-color-muted); margin: 0 0 4px; }}
+.how-to-read summary {{ cursor: pointer; }}
+.how-to-read p {{ margin: 4px 0 0; }}
 .episode-chart svg.panning {{ cursor: grabbing; }}
 .episode-chart .tip {{ position: absolute; pointer-events: none; z-index: 30;
   background: #fff; border: 1px solid var(--transect-color-border); border-radius: 4px;

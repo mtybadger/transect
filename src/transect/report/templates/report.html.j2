@@ -32,7 +32,7 @@
 {%- endif %}
 {% for t in transcripts %}
 <details class="transcript" id="{{ t.anchor }}"{% if t.open %} open{% endif %}>
-<summary><h2>{{ t.heading }}</h2></summary>
+<summary><span class="unit-marker" aria-hidden="true"></span><h2>{{ t.heading }}</h2></summary>
 {% if t.run_meta %}{{ t.run_meta }}{% endif %}
 {% for section in t.sections %}{{ section }}{% endfor %}
 </details>
@@ -153,24 +153,43 @@ function _transectEpisode(id) {
     var cursor = st.d0 + frac * (st.d1 - st.d0);
     var k = Math.exp(e.deltaY * 0.0015);
     var w = Math.min(st.data.span, Math.max(2, (st.d1 - st.d0) * k));
-    var d0 = cursor - frac * w;
-    d0 = Math.max(0, Math.min(st.data.span - w, d0));
-    st.d0 = d0; st.d1 = d0 + w;
-    _epRender(st);
+    _epSetWindow(st, cursor - frac * w, cursor - frac * w + w);
   }, {passive: false});
   svg.addEventListener("mousedown", function(e) {
     if (e.button !== 0) return;
-    st.drag = {x: _epMouseX(st, e), d0: st.d0, d1: st.d1};
+    e.preventDefault();  // no text selection while dragging
+    var px = _epMouseX(st, e);
+    var handle = e.target.getAttribute && e.target.getAttribute("data-nav");
+    if (handle === "left" || handle === "right") {
+      st.drag = {mode: handle, d0: st.d0, d1: st.d1};
+    } else if (handle === "thumb") {
+      st.drag = {mode: "thumb", x: px, d0: st.d0, d1: st.d1};
+    } else if (handle === "track") {
+      // click outside the thumb: centre the window there
+      var w0 = st.d1 - st.d0, c0 = _epNavV(st, px);
+      _epSetWindow(st, c0 - w0 / 2, c0 + w0 / 2);
+      st.drag = {mode: "thumb", x: px, d0: st.d0, d1: st.d1};
+    } else {
+      st.drag = {mode: "pan", x: px, d0: st.d0, d1: st.d1};
+    }
     svg.classList.add("panning");
   });
   window.addEventListener("mousemove", function(e) {
     if (!st.drag) return;
-    var g = _epGeom(st);
-    var dx = (_epMouseX(st, e) - st.drag.x) / g.plotW * (st.drag.d1 - st.drag.d0);
-    var w = st.drag.d1 - st.drag.d0;
-    var d0 = Math.max(0, Math.min(st.data.span - w, st.drag.d0 - dx));
-    st.d0 = d0; st.d1 = d0 + w;
-    _epRender(st);
+    var g = _epGeom(st), px = _epMouseX(st, e), dr = st.drag;
+    if (dr.mode === "pan") {
+      var w = dr.d1 - dr.d0;
+      var dx = (px - dr.x) / g.plotW * w;
+      _epSetWindow(st, dr.d0 - dx, dr.d1 - dx);
+    } else if (dr.mode === "thumb") {
+      var wt = dr.d1 - dr.d0;
+      var dv = (px - dr.x) / g.plotW * st.data.span;
+      _epSetWindow(st, dr.d0 + dv, dr.d1 + dv);
+    } else if (dr.mode === "left") {
+      _epSetWindow(st, Math.min(_epNavV(st, px), dr.d1 - 2), dr.d1);
+    } else if (dr.mode === "right") {
+      _epSetWindow(st, dr.d0, Math.max(_epNavV(st, px), dr.d0 + 2));
+    }
   });
   window.addEventListener("mouseup", function() { st.drag = null; svg.classList.remove("panning"); });
   svg.addEventListener("dblclick", function() { _transectEpisodeReset(id); });
@@ -190,13 +209,26 @@ function _transectEpisode(id) {
 }
 function _transectEpisodeReset(id) {
   var st = _episodes[id]; if (!st) return;
-  st.d0 = 0; st.d1 = st.data.span; _epRender(st);
+  _epSetWindow(st, 0, st.data.span);
 }
 function _epGeom(st) {
-  var W = 1180, LEFT = 150, RIGHT = 24, TOP = 34, ROW = 28, BOTTOM = 30;
+  var W = 1180, LEFT = 150, RIGHT = 24, TOP = 34, ROW = 28, GAPS = 22, NAV = 18, BOTTOM = 10;
   var n = st.data.lanes.length;
+  var lanesEnd = TOP + ROW * n;
   return {W: W, left: LEFT, right: RIGHT, top: TOP, row: ROW, plotW: W - LEFT - RIGHT,
-          H: TOP + ROW * n + BOTTOM, n: n};
+          lanesEnd: lanesEnd, navY: lanesEnd + GAPS, navH: NAV,
+          H: lanesEnd + GAPS + NAV + BOTTOM, n: n};
+}
+// navigator: the whole span mapped onto the plot width
+function _epNavX(st, v) { var g = _epGeom(st); return g.left + v / st.data.span * g.plotW; }
+function _epNavV(st, px) { var g = _epGeom(st); return Math.max(0, Math.min(st.data.span, (px - g.left) / g.plotW * st.data.span)); }
+function _epSetWindow(st, d0, d1) {
+  var span = st.data.span, minW = 2;
+  if (d1 - d0 < minW) { var c = (d0 + d1) / 2; d0 = c - minW / 2; d1 = c + minW / 2; }
+  if (d0 < 0) { d1 -= d0; d0 = 0; }
+  if (d1 > span) { d0 -= d1 - span; d1 = span; }
+  st.d0 = Math.max(0, d0); st.d1 = Math.min(span, d1);
+  _epRender(st);
 }
 function _epMouseX(st, e) {
   var r = st.svg.getBoundingClientRect();
@@ -232,15 +264,15 @@ function _epRender(st) {
   out.push('<text x="8" y="' + (g.top - 12) + '" fill="currentColor" fill-opacity="0.7" font-size="10">start ' + _epEsc(d.start) + (d.gaps.length ? " (gaps collapsed)" : "") + "</text>");
   for (var t = Math.ceil(d0 / step) * step; t <= d1; t += step) {
     var px = x(t);
-    out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (g.top - 6) + '" y2="' + (g.H - 30) + '" stroke="currentColor" stroke-opacity="0.07"/>');
+    out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (g.top - 6) + '" y2="' + g.lanesEnd + '" stroke="currentColor" stroke-opacity="0.07"/>');
     out.push('<text x="' + px.toFixed(1) + '" y="' + (g.top - 12) + '" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">+' + _epLabel(_epReal(st, t)) + "</text>");
   }
   out.push('<g clip-path="url(#' + st.id + '-clip)">');
   d.gaps.forEach(function(gp) {
     if (gp.x < d0 || gp.x > d1) return;
     var px = x(gp.x);
-    out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (g.top - 4) + '" y2="' + (g.H - 30) + '" stroke="#999" stroke-dasharray="3,3"/>');
-    out.push('<text x="' + px.toFixed(1) + '" y="' + (g.H - 16) + '" text-anchor="middle" font-size="10" fill="#777">' + _epEsc(gp.label) + "</text>");
+    out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (g.top - 4) + '" y2="' + g.lanesEnd + '" stroke="#999" stroke-dasharray="3,3"/>');
+    out.push('<text x="' + px.toFixed(1) + '" y="' + (g.lanesEnd + 12) + '" text-anchor="middle" font-size="10" fill="#777">' + _epEsc(gp.label) + "</text>");
   });
   d.lanes.forEach(function(lane, i) {
     var mid = g.top + i * g.row + g.row / 2;
@@ -265,6 +297,19 @@ function _epRender(st) {
     }
   });
   out.push("</g>");
+  // the navigator: the whole episode, a thumb over the visible window
+  // with handles at its ends (drag the thumb to pan, a handle to zoom)
+  var ny = g.navY, nh = g.navH;
+  out.push('<rect x="' + g.left + '" y="' + ny + '" width="' + g.plotW + '" height="' + nh + '" rx="3" fill="#f1f3f5" stroke="#dee2e6" data-nav="track"/>');
+  d.turns.forEach(function(tn) {
+    var nx = _epNavX(st, tn.x1);
+    out.push('<line x1="' + nx.toFixed(1) + '" x2="' + nx.toFixed(1) + '" y1="' + (ny + 3) + '" y2="' + (ny + nh - 3) + '" stroke="' + tn.color + '" stroke-opacity="0.35" pointer-events="none"/>');
+  });
+  var tx0 = _epNavX(st, d0), tx1 = Math.max(_epNavX(st, d1), tx0 + 8);
+  out.push('<rect x="' + tx0.toFixed(1) + '" y="' + ny + '" width="' + (tx1 - tx0).toFixed(1) + '" height="' + nh + '" rx="3" fill="#104D6A" fill-opacity="0.18" stroke="#104D6A" stroke-opacity="0.6" data-nav="thumb" style="cursor:grab"/>');
+  out.push('<rect x="' + (tx0 - 3).toFixed(1) + '" y="' + (ny - 2) + '" width="7" height="' + (nh + 4) + '" rx="2" fill="#104D6A" data-nav="left" style="cursor:ew-resize"/>');
+  out.push('<rect x="' + (tx1 - 4).toFixed(1) + '" y="' + (ny - 2) + '" width="7" height="' + (nh + 4) + '" rx="2" fill="#104D6A" data-nav="right" style="cursor:ew-resize"/>');
+  out.push('<text x="' + (g.left - 8) + '" y="' + (ny + nh - 5) + '" text-anchor="end" font-size="10" fill="currentColor" fill-opacity="0.6">navigator</text>');
   d.lanes.forEach(function(lane, i) {
     var mid = g.top + i * g.row + g.row / 2 + 4;
     var label = lane.kind === "agent" ? lane.name : lane.name + " (world)";

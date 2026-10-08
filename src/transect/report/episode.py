@@ -5,13 +5,14 @@ A conventional transcript has one lane and no overview. A multi-agent
 episode (a Krill run, any log with sibling top-level agent spans) gets
 this section once, ahead of its per-lane sections: the world lane's
 channel messages and world actions, and each agent lane's model turns
-and the deliveries that reached it, all placed by recorded timestamp.
-The axis is wall clock without gap compression: an idle stretch is
-drawn at its true length, because waiting is part of the behaviour.
+(coloured by judged phase when a phase scan ran) and the deliveries that
+reached it, all placed by recorded timestamp. The axis is wall clock
+without gap compression: an idle stretch is drawn at its true length,
+because waiting is part of the behaviour.
 
-The chart is inline SVG built here from the frames (`lanes`,
-`token_timeline`, `lane_events`), not an inspect-viz chart: it needs no
-CDN assets and the frames already hold every timestamp it draws.
+The chart is `charts.episode_lanes`, an inspect-viz plot like every other
+chart section, so hover tooltips, embedding and sizing follow the rest of
+the report; this module only shapes the frames it draws.
 """
 
 from datetime import datetime, timedelta
@@ -20,15 +21,11 @@ import pandas as pd
 from markupsafe import Markup, escape
 
 from transect.frames import spine
-from transect.report import sections
+from transect.report import charts, sections
+from transect.report.colors import _UNJUDGED_GREY
+from transect.report.embed import embed_section
+from transect.report.style import _WIDGET_STYLE_CSS
 
-WIDTH = 1180
-LEFT = 150  # lane label gutter
-RIGHT = 24
-TOP = 34  # the time axis
-BOTTOM = 52  # the legend
-LANE_H = 24
-TURN_FILL = "#4c78a8"
 DELIVERY_FILL = "#f28e2b"
 WORLD_FILL = "#8c8c8c"
 CHANNEL_COLORS = {
@@ -38,79 +35,55 @@ CHANNEL_COLORS = {
     "principal": "#b07aa1",
     "operator": "#f28e2b",
 }
-_TICK_STEPS_S = (15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400)
+_TEXT_CHARS = 160
 
 
 def episode_overview_section(
-    lanes: pd.DataFrame, timeline: pd.DataFrame, events: pd.DataFrame
+    lanes: pd.DataFrame,
+    timeline: pd.DataFrame,
+    events: pd.DataFrame,
+    phase_turns: pd.DataFrame | None = None,
+    phase_colors: dict[str, str] | None = None,
 ) -> Markup:
     """The whole Episode timeline section for one transcript."""
+    rows = _lane_rows(lanes)
+    labels = [name if kind == "agent" else f"{name} (world)" for name, kind in rows]
+    row_of = {name: index for index, (name, _kind) in enumerate(rows)}
+    t0, t1 = _bounds(lanes, timeline, events)
+    span_s = max((t1 - t0).total_seconds(), 1.0)
+    turns = _turn_rows(timeline, phase_turns, phase_colors or {}, row_of, t0)
+    points = _point_rows(events, row_of, t0)
+    component, height = charts.episode_lanes(
+        turns,
+        points,
+        labels,
+        span_s,
+        x_label=f"seconds since episode start ({t0.strftime('%Y-%m-%d %H:%M:%S %Z')})",
+    )
+    judged = phase_turns is not None and len(phase_turns) > 0
     intro = Markup(
         "<p>Every top-level lane of this transcript on one wall-clock axis: "
         "the world lane's channel messages (ticks, coloured by channel) and "
         "world actions (dots), and each agent lane's model turns (boxes, "
-        "start to completion) with the deliveries that verifiably entered "
-        "its context (triangles). Time is recorded wall clock with no gap "
-        "compression. Hover an element for its detail.</p>"
+        "start to completion"
+        + (", coloured by judged phase" if judged else "")
+        + ") with the deliveries that verifiably entered its context "
+        "(triangles). Time is recorded wall clock with no gap compression. "
+        "Hover any element for its detail.</p>"
     )
-    return sections.section(
-        "Episode timeline",
-        [
-            intro,
-            Markup(episode_svg(lanes, timeline, events)),
-            _lane_table(lanes, timeline, events),
-        ],
-    )
-
-
-def episode_svg(
-    lanes: pd.DataFrame, timeline: pd.DataFrame, events: pd.DataFrame
-) -> str:
-    """The lanes chart as an SVG string."""
-    rows = _lane_rows(lanes)
-    t0, t1 = _bounds(lanes, timeline, events)
-    span_s = max((t1 - t0).total_seconds(), 1.0)
-    plot_w = WIDTH - LEFT - RIGHT
-
-    def x(stamp: datetime) -> float:
-        return LEFT + (stamp - t0).total_seconds() / span_s * plot_w
-
-    height = TOP + LANE_H * len(rows) + BOTTOM
-    out = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
-        f'width="100%" style="max-width:{WIDTH}px;font:12px system-ui,sans-serif;'
-        'background:transparent" role="img" aria-label="Episode timeline">'
+    blocks: list[Markup | None] = [
+        intro,
+        Markup(embed_section([component], height, extra_head=_WIDGET_STYLE_CSS)),
+        _glyph_legend(),
     ]
-    out.extend(_axis(t0, span_s, x, height))
-    main = timeline[timeline.agent_span_id.isna() & timeline.turn.notna()]
-    for index, (name, kind) in enumerate(rows):
-        top = TOP + index * LANE_H
-        mid = top + LANE_H / 2
-        label = f"{name}" if kind == "agent" else f"{name} (world)"
-        out.append(
-            f'<text x="8" y="{mid + 4:.1f}" fill="currentColor">{escape(label)}</text>'
-        )
-        lane_row = lanes[lanes.lane == name]
-        begin = spine.parse(lane_row.begin_at.iloc[0]) if len(lane_row) else None
-        end = spine.parse(lane_row.end_at.iloc[0]) if len(lane_row) else None
-        if begin is not None and end is not None:
-            out.append(
-                f'<line x1="{x(begin):.1f}" x2="{x(end):.1f}" '
-                f'y1="{mid:.1f}" y2="{mid:.1f}" '
-                'stroke="currentColor" stroke-opacity="0.18" stroke-width="1"/>'
-            )
-        if kind == "agent":
-            out.extend(_turn_boxes(main[main.lane == name], name, top, x))
-            out.extend(
-                _deliveries(
-                    events[(events.lane == name) & (events.kind == "delivery")], top, x
-                )
-            )
-        else:
-            out.extend(_world_marks(events[events.lane == name], top, x))
-    out.extend(_legend(height))
-    out.append("</svg>")
-    return "".join(out)
+    if judged and phase_colors:
+        counts = {
+            str(label): int(n)
+            for label, n in turns[turns.phase.notna()].phase.value_counts().items()
+        }
+        blocks.append(sections.label_chips(counts, phase_colors))
+    blocks.append(_lane_table(lanes, timeline, events))
+    return sections.section("Episode timeline", blocks)
 
 
 def _lane_rows(lanes: pd.DataFrame) -> list[tuple[str, str]]:
@@ -144,159 +117,153 @@ def _bounds(lanes, timeline, events) -> tuple[datetime, datetime]:
     return t0, t1
 
 
-def _axis(t0: datetime, span_s: float, x, height: int) -> list[str]:
-    step = next((s for s in _TICK_STEPS_S if span_s / s <= 14), _TICK_STEPS_S[-1])
-    out = [
-        f'<line x1="{LEFT}" x2="{WIDTH - RIGHT}" y1="{TOP - 6}" y2="{TOP - 6}" '
-        'stroke="currentColor" stroke-opacity="0.4"/>'
-    ]
-    seconds = 0
-    while seconds <= span_s:
-        stamp = t0 + timedelta(seconds=seconds)
-        px = x(stamp)
-        out.append(
-            f'<line x1="{px:.1f}" x2="{px:.1f}" y1="{TOP - 6}" y2="{height - BOTTOM}" '
-            'stroke="currentColor" stroke-opacity="0.08"/>'
-        )
-        out.append(
-            f'<text x="{px:.1f}" y="{TOP - 12}" text-anchor="middle" '
-            f'fill="currentColor" fill-opacity="0.8">{_offset_label(seconds)}</text>'
-        )
-        seconds += step
-    out.append(
-        f'<text x="{LEFT}" y="12" fill="currentColor" fill-opacity="0.7">'
-        f"start {escape(t0.strftime('%Y-%m-%d %H:%M:%S %Z'))}</text>"
-    )
-    return out
-
-
-def _offset_label(seconds: int) -> str:
-    if seconds >= 3600:
-        return f"+{seconds // 3600}:{(seconds % 3600) // 60:02d}h"
-    return f"+{seconds // 60}:{seconds % 60:02d}"
-
-
-def _turn_boxes(turns: pd.DataFrame, lane: str, top: float, x) -> list[str]:
-    out = []
-    for row in turns.to_dict("records"):
+def _turn_rows(
+    timeline: pd.DataFrame,
+    phase_turns: pd.DataFrame | None,
+    colors: dict[str, str],
+    row_of: dict[str, int],
+    t0: datetime,
+) -> pd.DataFrame:
+    """One row per agent model turn, in the chart's columns."""
+    main = timeline[timeline.agent_span_id.isna() & timeline.turn.notna()]
+    phase_of: dict[tuple[str, int], str] = {}
+    if phase_turns is not None and len(phase_turns) and "lane" in phase_turns.columns:
+        for row in phase_turns.to_dict("records"):
+            if row.get("phase") is not None and not pd.isna(row.get("phase")):
+                phase_of[(str(row["lane"]), int(row["turn"]))] = str(row["phase"])
+    rows = []
+    for row in main.to_dict("records"):
         start = spine.parse(row["timestamp"])
-        if start is None:
+        if start is None or str(row["lane"]) not in row_of:
             continue
         done = spine.parse(row["completed"])
-        x0 = x(start)
-        x1 = x(done) if done is not None else x0
-        width = max(x1 - x0, 1.5)
-        tokens = _cell(row["output_tokens"])
-        when = start.strftime("%H:%M:%S")
-        if done is not None:
-            when += f" to {done.strftime('%H:%M:%S')}"
-        title = f"{lane} · turn {_cell(row['turn'])} · {when}"
-        if tokens:
-            title += f" · {tokens} output tokens"
-        out.append(
-            f'<rect x="{x0:.1f}" y="{top + 6:.1f}" width="{width:.1f}" '
-            f'height="12" fill="{TURN_FILL}" rx="1">'
-            f"<title>{escape(title)}</title></rect>"
+        x1 = (start - t0).total_seconds()
+        x2 = (done - t0).total_seconds() if done is not None else x1
+        lane = str(row["lane"])
+        turn = int(row["turn"])
+        phase = phase_of.get((lane, turn))
+        tools = row.get("n_tool_calls")
+        detail = []
+        if tools is not None and not pd.isna(tools) and int(tools):
+            detail.append(f"{int(tools)} tool call(s)")
+        tokens = row.get("output_tokens")
+        if tokens is not None and not pd.isna(tokens):
+            detail.append(f"{int(tokens)} output tokens")
+        rows.append(
+            {
+                "row": row_of[lane],
+                "x1": x1,
+                "x2": max(x2, x1),
+                "color": colors.get(phase or "", _UNJUDGED_GREY),
+                "phase": phase,
+                "what": f"turn {turn}" + (f" · {phase}" if phase else " · unjudged"),
+                "lane": lane,
+                "time": _when(start, t0, done),
+                "who": "",
+                "text": " · ".join(detail),
+            }
         )
-    return out
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "row",
+            "x1",
+            "x2",
+            "color",
+            "phase",
+            "what",
+            "lane",
+            "time",
+            "who",
+            "text",
+        ],
+    )
 
 
-def _deliveries(deliveries: pd.DataFrame, top: float, x) -> list[str]:
-    out = []
-    for row in deliveries.to_dict("records"):
+def _point_rows(
+    events: pd.DataFrame, row_of: dict[str, int], t0: datetime
+) -> pd.DataFrame:
+    """One row per delivery, channel message or world action."""
+    rows = []
+    for row in events.to_dict("records"):
         stamp = spine.parse(row["timestamp"])
-        if stamp is None:
+        lane = str(row["lane"])
+        if stamp is None or lane not in row_of:
             continue
-        px = x(stamp)
-        channel = _cell(row["channel"])
-        who = f"[{channel}] {_cell(row['sender'])}" if channel else _cell(row["sender"])
-        title = f"delivered to lane · {who}: {_cell(row['text'])}"
-        out.append(
-            f'<path d="M{px - 4:.1f},{top + 1:.1f} L{px + 4:.1f},{top + 1:.1f} '
-            f'L{px:.1f},{top + 7:.1f} Z" fill="{DELIVERY_FILL}">'
-            f"<title>{escape(title)}</title></path>"
-        )
-    return out
-
-
-def _world_marks(world: pd.DataFrame, top: float, x) -> list[str]:
-    out = []
-    for row in world.to_dict("records"):
-        stamp = spine.parse(row["timestamp"])
-        if stamp is None:
-            continue
-        px = x(stamp)
         kind = _cell(row["kind"])
-        if kind == "message":
+        source = _cell(row["source"])
+        text = _cell(row["text"])[:_TEXT_CHARS]
+        base = {
+            "row": row_of[lane],
+            "x": (stamp - t0).total_seconds(),
+            "lane": lane,
+            "time": _when(stamp, t0),
+        }
+        if kind == "delivery":
             channel = _cell(row["channel"])
-            color = CHANNEL_COLORS.get(channel, WORLD_FILL)
-            title = f"[{channel}] {_cell(row['sender'])}: {_cell(row['text'])}"
-            out.append(
-                f'<line x1="{px:.1f}" x2="{px:.1f}" y1="{top + 3:.1f}" '
-                f'y2="{top + 13:.1f}" stroke="{color}" stroke-width="2">'
-                f"<title>{escape(title)}</title></line>"
+            rows.append(
+                {
+                    **base,
+                    "kind": "delivery",
+                    "color": DELIVERY_FILL,
+                    "what": "delivery into context",
+                    "who": f"[{channel}] {_cell(row['sender'])}".strip(),
+                    "text": text,
+                }
             )
-        elif _cell(row["source"]) == "world":
-            title = f"{kind} · {_cell(row['sender'])}"
-            text = _cell(row["text"])
-            if text:
-                title += f": {text}"
-            out.append(
-                f'<circle cx="{px:.1f}" cy="{top + 18:.1f}" r="2.5" '
-                f'fill="{WORLD_FILL}"><title>{escape(title)}</title></circle>'
+        elif kind == "message":
+            channel = _cell(row["channel"])
+            rows.append(
+                {
+                    **base,
+                    "kind": "message",
+                    "color": CHANNEL_COLORS.get(channel, WORLD_FILL),
+                    "what": f"{channel} message",
+                    "who": _cell(row["sender"]),
+                    "text": text,
+                }
             )
-    return out
+        elif source == "world":
+            rows.append(
+                {
+                    **base,
+                    "kind": "action",
+                    "color": WORLD_FILL,
+                    "what": kind,
+                    "who": _cell(row["sender"]),
+                    "text": text,
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=["row", "x", "kind", "color", "what", "lane", "time", "who", "text"],
+    )
 
 
-def _cell(value) -> str:
-    """A frame cell as text: "" for None / NA, integers without a
-    trailing .0, everything else via str."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
+def _when(stamp: datetime, t0: datetime, done: datetime | None = None) -> str:
+    offset = int((stamp - t0).total_seconds())
+    out = f"+{offset // 60}:{offset % 60:02d} ({stamp.strftime('%H:%M:%S')}"
+    if done is not None:
+        out += f" to {done.strftime('%H:%M:%S')}"
+    return out + ")"
 
 
-def _legend(height: int) -> list[str]:
-    y = height - BOTTOM + 22
+def _glyph_legend() -> Markup:
     items = [
-        (TURN_FILL, "rect", "agent model turn"),
-        (DELIVERY_FILL, "tri", "delivery into the agent's context"),
-        (WORLD_FILL, "dot", "world action / event"),
+        (f"background:{DELIVERY_FILL}", "delivery into an agent's context"),
+        (f"background:{WORLD_FILL};border-radius:50%", "world action / event"),
     ] + [
-        (color, "tick", f"{channel} message")
+        (f"background:{color};width:3px", f"{channel} message")
         for channel, color in CHANNEL_COLORS.items()
     ]
-    out = []
-    px = LEFT
-    for color, shape, text in items:
-        if shape == "rect":
-            out.append(
-                f'<rect x="{px}" y="{y - 9}" width="14" height="10" fill="{color}"/>'
-            )
-        elif shape == "tri":
-            out.append(
-                f'<path d="M{px},{y - 9} L{px + 12},{y - 9} L{px + 6},{y} Z" '
-                f'fill="{color}"/>'
-            )
-        elif shape == "dot":
-            out.append(f'<circle cx="{px + 6}" cy="{y - 4}" r="3" fill="{color}"/>')
-        else:
-            out.append(
-                f'<line x1="{px + 6}" x2="{px + 6}" y1="{y - 10}" y2="{y}" '
-                f'stroke="{color}" stroke-width="2"/>'
-            )
-        out.append(
-            f'<text x="{px + 20}" y="{y}" fill="currentColor">{escape(text)}</text>'
-        )
-        px += 20 + 7 * len(text) + 24
-    return out
+    chips = "".join(
+        '<span style="display:inline-flex;align-items:center;gap:4px;'
+        'margin-right:14px">'
+        f'<span style="display:inline-block;width:10px;height:10px;{style}"></span>'
+        f"{escape(text)}</span>"
+        for style, text in items
+    )
+    return Markup(f'<p class="meta" style="font-size:0.8rem">{chips}</p>')
 
 
 def _lane_table(
@@ -323,9 +290,23 @@ def _lane_table(
             f"<td>{delivered}</td><td>{said}</td><td>{acted}</td></tr>"
         )
     return Markup(
-        "<table><thead><tr><th>lane</th><th>kind</th><th>model turns</th>"
-        "<th>output tokens</th><th>deliveries received</th><th>messages sent</th>"
-        "<th>world actions</th></tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table>"
+        '<div class="relmap-scroll"><table class="relmap"><thead><tr><th>lane</th>'
+        "<th>kind</th><th>model turns</th><th>output tokens</th>"
+        "<th>deliveries received</th><th>messages sent</th><th>world actions</th>"
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
     )
+
+
+def _cell(value) -> str:
+    """A frame cell as text: "" for None / NA, integers without a
+    trailing .0, everything else via str."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)

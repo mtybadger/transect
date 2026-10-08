@@ -18,6 +18,7 @@ class TurnVote(BaseModel):
     label: str
     agreement: float  # voters on the modal label / n_voting
     n_voting: int
+    lane: str | None = None  # the top-level lane the turn belongs to
 
 
 class ConsensusJudgement(DigestJudgement):
@@ -34,6 +35,7 @@ class CohortMember(BaseModel):
     model: str
     roll: int
     turns: list[DigestJudgement] = []
+    lane: str | None = None  # one record per (member, lane) on an episode
 
 
 class CohortAgreement(BaseModel):

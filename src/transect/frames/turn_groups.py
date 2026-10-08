@@ -14,7 +14,14 @@ Columns (identity prefix explained in common.py):
 
 import pandas as pd
 
-from transect.frames.common import IDENTITY_COLS, identity, result_value, with_schema
+from transect.frames.common import (
+    IDENTITY_COLS,
+    LANE_COLS,
+    identity,
+    lane_of_judged,
+    result_value,
+    with_schema,
+)
 
 
 def turn_groups_df(results: pd.DataFrame) -> pd.DataFrame:
@@ -28,6 +35,7 @@ def turn_groups_df(results: pd.DataFrame) -> pd.DataFrame:
                 rows.append(
                     {
                         **identity_cols,
+                        **lane_of_judged(phase),
                         "phase_index": phase_index,
                         "group_index": group_index,
                         **group,
@@ -35,6 +43,7 @@ def turn_groups_df(results: pd.DataFrame) -> pd.DataFrame:
                 )
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "phase_index",
         "group_index",
         "turn_start",

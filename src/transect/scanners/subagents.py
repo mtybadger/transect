@@ -24,6 +24,7 @@ from transect.scanners.helpers import (
     capped_lines,
     span_activity,
     span_task_text,
+    top_lanes,
 )
 from transect.spec import Spec
 
@@ -57,33 +58,45 @@ def agent_spans() -> Loader[Transcript]:
     """
 
     async def load(transcript: Transcript) -> AsyncIterator[Transcript]:
-        lanes = Lanes(transcript)
-        for span in lanes.begins:  # event order
-            task, source = span_task_text(span, lanes.first_models.get(span.id))
-            task_truncated = len(task) > _PROMPT_CHARS
-            task = task[:_PROMPT_CHARS]
-            if not task:
-                continue  # no classifier input -> no judge call, no row
-            messages: list[ChatMessage] = [
-                ChatMessageUser(content=f"name: {span.name}\ntask: {task}")
-            ]
-            digest = _activity_digest(span_activity(lanes, span.id))
-            if digest:
-                messages.append(ChatMessageUser(content=digest))
-            yield Transcript(
+        for top in top_lanes(transcript):
+            for item in _lane_spans(transcript, Lanes(transcript, top)):
+                yield item
+
+    return load
+
+
+def _lane_spans(transcript: Transcript, lanes: Lanes) -> list[Transcript]:
+    """The classifier items of one lane's sub-agent spans, in event order."""
+    items: list[Transcript] = []
+    for span in lanes.begins:
+        task, source = span_task_text(span, lanes.first_models.get(span.id))
+        task_truncated = len(task) > _PROMPT_CHARS
+        task = task[:_PROMPT_CHARS]
+        if not task:
+            continue  # no classifier input -> no judge call, no row
+        messages: list[ChatMessage] = [
+            ChatMessageUser(content=f"name: {span.name}\ntask: {task}")
+        ]
+        digest = _activity_digest(span_activity(lanes, span.id))
+        if digest:
+            messages.append(ChatMessageUser(content=digest))
+        items.append(
+            Transcript(
                 transcript_id=span.id,  # -> results input_ids (the join key)
                 messages=messages,
                 metadata={
                     "agent_span_id": span.id,
                     "agent_lane": span.name,
+                    "lane": lanes.name,
+                    "lane_kind": lanes.kind,
                     "span_task_source": source,
                     # the exact task text the judge saw
                     "span_task": task,
                     "span_task_truncated": task_truncated,
                 },
             )
-
-    return load
+        )
+    return items
 
 
 @scanner(loader=agent_spans())

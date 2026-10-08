@@ -117,6 +117,10 @@ class PhaseReview(BaseModel):
 class StitchedPhase(BaseModel):
     """One phase: consecutive same-label segments merged across chunk boundaries."""
 
+    lane: str | None = Field(
+        default=None,
+        description="The top-level lane the phase belongs to (helpers.top_lanes).",
+    )
     phase: str = Field(description="The label shared by the merged judgements.")
     turn_start: int = Field(description="First digest turn of the phase (inclusive).")
     turn_end: int = Field(description="Last digest turn of the phase (inclusive).")

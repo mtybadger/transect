@@ -66,6 +66,8 @@ def test_loader_yields_one_item_per_tasked_sub_agent_span():
         "span_task_source": "spawn_prompt",
         "span_task": "Survey related work",
         "span_task_truncated": False,
+        "lane": "main",
+        "lane_kind": "agent",
     }
     assert "task: Survey related work" in item.messages[0].text
 

@@ -29,8 +29,10 @@ from transect.frames.common import (
     BASES,
     IDENTITY_COLS,
     LABEL_SOURCES,
+    LANE_COLS,
     categorical,
     identity,
+    lane_of_judged,
     result_value,
     with_schema,
 )
@@ -55,6 +57,7 @@ def phase_turns_df(results: pd.DataFrame) -> pd.DataFrame:
             rows.append(
                 {
                     **identity_cols,
+                    **lane_of_judged(entry),
                     "turn": entry.get("turn"),
                     "phase_index": index,
                     "phase": (
@@ -72,6 +75,7 @@ def phase_turns_df(results: pd.DataFrame) -> pd.DataFrame:
             )
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "turn",
         "phase_index",
         "phase",

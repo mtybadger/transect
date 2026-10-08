@@ -83,7 +83,7 @@ def render_report(
     units = _render_units(order, results.lanes)
     for idx, (transcript_id, lane, opens_episode) in enumerate(units):
         if opens_episode:
-            transcripts.append(_episode_entry(results, transcript_id))
+            transcripts.append(_episode_entry(results, transcript_id, phase_colors))
         one = _mine(timeline, transcript_id, lane)
         # the orchestrator's rows: the turn axis every chart draws on
         main = one[one.turn.notna()]
@@ -158,7 +158,7 @@ def render_report(
                     if pd.notna(n)
                 }
             elif my_extras:
-                tool_counts = my_extras.tool_counts
+                tool_counts = my_extras.tool_counts_for(lane)
             timeline_section = sections.section(
                 "Phase timeline",
                 [
@@ -207,7 +207,7 @@ def render_report(
                         # flushes.turn is the first post-flush turn; the
                         # summarization call is the model turn before it
                         mark_compaction_turns(
-                            my_extras.excerpts,
+                            my_extras.excerpts_for(lane),
                             my_flushes.turn[my_flushes.compaction_prompt.notna()] - 1,
                         )
                         if my_extras
@@ -342,11 +342,15 @@ def render_report(
         if phase_cards_section is not None:
             add(("phase_cards", phase_cards_section))
 
-        # 6. custom layers, badge-marked; their names are section keys
+        # 6. custom layers, badge-marked; their names are section keys.
+        # Episode-scoped layers render once in the episode entry; lane-
+        # scoped ones take this unit's lane slice.
         for layer in results.extra_layers:
-            if not layer.section:
+            if not layer.section or (layer.scope == "episode" and lane is not None):
                 continue
-            layer_frame = _my_layer_frame(results, layer, transcript_id)
+            layer_frame = _my_layer_frame(
+                results, layer, transcript_id, lane if layer.scope == "lane" else None
+            )
             ctx = custom.SectionContext(
                 transcript_id=transcript_id,
                 frame=layer_frame,
@@ -750,21 +754,39 @@ def _render_units(
     return units
 
 
-def _episode_entry(results: TransectResults, transcript_id: str) -> dict:
+def _episode_entry(
+    results: TransectResults, transcript_id: str, phase_colors: dict | None = None
+) -> dict:
     """The episode overview, rendered as its own titled entry ahead of
     the episode's per-lane entries."""
     timeline = _mine(results.token_timeline, transcript_id)
     info = _mine(results.transcript_info, transcript_id)
+    episode_sections = [
+        episode_overview_section(
+            _mine(results.lanes, transcript_id),
+            timeline,
+            _mine(results.lane_events, transcript_id),
+            phase_turns=_mine(results.phase_turns, transcript_id),
+            phase_colors={k: v[0] for k, v in (phase_colors or {}).items()},
+        )
+    ]
+    main = timeline[timeline.turn.notna()]
+    n_turns = int(main.turn.max()) + 1 if len(main) else 0
+    for layer in results.extra_layers:
+        if not layer.section or layer.scope != "episode":
+            continue
+        layer_frame = _my_layer_frame(results, layer, transcript_id)
+        ctx = custom.SectionContext(
+            transcript_id=transcript_id, frame=layer_frame, n_turns=n_turns
+        )
+        definitions = _mine(results.label_definitions, transcript_id)
+        episode_sections.append(
+            custom.layer_section(layer, layer_frame, ctx, definitions)
+        )
     return {
         "heading": f"Episode · {_transcript_title(timeline, info)}",
         "run_meta": sections.run_intro_line(info),
-        "sections": [
-            episode_overview_section(
-                _mine(results.lanes, transcript_id),
-                timeline,
-                _mine(results.lane_events, transcript_id),
-            )
-        ],
+        "sections": episode_sections,
     }
 
 
@@ -785,11 +807,14 @@ def _apply_order(
     return listed + [kv for kv in keyed if kv[0] not in set(section_order)]
 
 
-def _my_layer_frame(results, layer, transcript_id: str) -> pd.DataFrame | None:
-    """One layer's mounted frame cut to this transcript."""
+def _my_layer_frame(
+    results, layer, transcript_id: str, lane: str | None = None
+) -> pd.DataFrame | None:
+    """One layer's mounted frame cut to this transcript (and to this lane
+    when given and the frame carries lanes)."""
     frame = results.layer_frames.get(layer.name)
     if frame is not None and "transcript_id" in frame.columns:
-        return _mine(frame, transcript_id)
+        return _mine(frame, transcript_id, lane)
     return frame
 
 

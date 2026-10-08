@@ -5,6 +5,7 @@ from bisect import bisect_right
 from collections.abc import Collection, Sequence
 from typing import Any, Literal, cast
 
+from inspect_ai.event import TimelineSpan
 from inspect_ai.model import CachePolicy, Model, get_model
 from inspect_scout import AnswerStructured, Result, Scanner, Transcript, scanner
 from pydantic import BaseModel, Field, JsonValue, create_model
@@ -19,9 +20,9 @@ from transect.scanners.cohort import (
 from transect.scanners.helpers import (
     Lanes,
     message_reasoning,
-    orchestrator_turns,
     span_task_text,
     strip_subagent_scaffold,
+    top_lanes,
 )
 from transect.scanners.phases_cohort import (
     Cohort,
@@ -104,6 +105,7 @@ class _Segment(BaseModel):
 class PhaseTurn(BaseModel):
     """One row of the dense ``turns`` surface."""
 
+    lane: str | None = None  # the top-level lane the turn belongs to
     turn: int
     phase_index: int | None = None
     basis: TurnBasis
@@ -339,111 +341,153 @@ def decision_phases(
         judges = [(member, member.resolve()) for member in members_spec]
         member_keys = [member.key for member in members_spec]
         n_members = len(members_spec)
-        digests = turn_digests(transcript, snippet_chars=snippet_chars)
-        n_turns = sum(1 for _ in orchestrator_turns(transcript))
-        task_prompt = agent_task_prompt(transcript)
-        system = system_prompt(spec, task_prompt=task_prompt)
-        digest_judgements: list[ConsensusJudgement] = []
-        # (model name, roll) -> that member's per-turn rows, whole run
-        member_rows: dict[tuple[str, int], list[DigestJudgement]] = {
-            key: [] for key in member_keys
-        }
-        votes: list[TurnVote] = []
-        last_phase: str | None = None
-        for start in range(0, len(digests), chunk):
-            chunk_digests = digests[start : start + chunk]
-            user = chunk_user_prompt(chunk_digests, last_phase)
-            answers = await gather_judge_calls(
-                call_judge(judge, answer, system, user, roll_cache(cache, member.roll))
-                for member, judge in judges
-            )
-            chunk_rows: dict[tuple[str, int], list[DigestJudgement]] = {}
-            for (member, _), (value, status) in zip(judges, answers, strict=True):
-                key = member.key
-                if status != "ok":
-                    chunk_rows[key] = [
-                        DigestJudgement(turn=d.turn, basis=status)
-                        for d in chunk_digests
-                    ]
-                    continue
-                chunk_segments = _validate_segments(
-                    cast(list[JsonValue], (value or {}).get("segments") or []),
-                    first=chunk_digests[0].turn,
-                    last=chunk_digests[-1].turn,
+        all_phases: list[StitchedPhase] = []
+        all_turns: list[PhaseTurn] = []
+        all_members: list[CohortMember] = []
+        all_votes: list[TurnVote] = []
+        audits: list[VerifierAudit] = []
+        narrators: list[NarratorAudit] = []
+        total_turns = 0
+        total_digests = 0
+        n_lanes = 0
+        for top in top_lanes(transcript):
+            lane_obj = Lanes(transcript, top)
+            if lane_obj.kind != "agent":
+                continue  # the world lane has no model turns to segment
+            n_lanes += 1
+            lane_name = lane_obj.name
+            digests = turn_digests(transcript, snippet_chars=snippet_chars, lane=top)
+            n_turns = sum(1 for _ in lane_obj.turns())
+            task_prompt = lane_task_prompt(transcript, lane_obj)
+            system = system_prompt(spec, task_prompt=task_prompt)
+            digest_judgements: list[ConsensusJudgement] = []
+            # (model name, roll) -> that member's per-turn rows, whole lane
+            member_rows: dict[tuple[str, int], list[DigestJudgement]] = {
+                key: [] for key in member_keys
+            }
+            votes: list[TurnVote] = []
+            last_phase: str | None = None
+            for start in range(0, len(digests), chunk):
+                chunk_digests = digests[start : start + chunk]
+                user = chunk_user_prompt(chunk_digests, last_phase)
+                answers = await gather_judge_calls(
+                    call_judge(
+                        judge, answer, system, user, roll_cache(cache, member.roll)
+                    )
+                    for member, judge in judges
                 )
-                chunk_rows[key] = _project_chunk(
-                    chunk_digests, chunk_segments, last_phase
+                chunk_rows: dict[tuple[str, int], list[DigestJudgement]] = {}
+                for (member, _), (value, status) in zip(judges, answers, strict=True):
+                    key = member.key
+                    if status != "ok":
+                        chunk_rows[key] = [
+                            DigestJudgement(turn=d.turn, basis=status)
+                            for d in chunk_digests
+                        ]
+                        continue
+                    chunk_segments = _validate_segments(
+                        cast(list[JsonValue], (value or {}).get("segments") or []),
+                        first=chunk_digests[0].turn,
+                        last=chunk_digests[-1].turn,
+                    )
+                    chunk_rows[key] = _project_chunk(
+                        chunk_digests, chunk_segments, last_phase
+                    )
+                consensus, chunk_votes = vote_turns(
+                    chunk_rows, order=member_keys, carry=last_phase
                 )
-            consensus, chunk_votes = vote_turns(
-                chunk_rows, order=member_keys, carry=last_phase
-            )
-            digest_judgements.extend(consensus)
-            votes.extend(chunk_votes)
-            for key, rows in chunk_rows.items():
-                member_rows[key].extend(rows)
-            tail = consensus[-1]
-            if tail.basis in ("refusal", "no_answer"):
-                # reset so the next chunk gets no false-adjacency hint
-                last_phase = None
-            else:
-                last_phase = tail.phase or last_phase
-        phases = stitch_phases(digest_judgements)
-        audit = VerifierAudit(ran=False)
-        if verify_on and phases:
-            verifier = judges[0][1]
-            if verifier_model is not None:
-                verifier = (
-                    verifier_model
-                    if isinstance(verifier_model, Model)
-                    else get_model(verifier_model)
+                digest_judgements.extend(consensus)
+                votes.extend(chunk_votes)
+                for key, rows in chunk_rows.items():
+                    member_rows[key].extend(rows)
+                tail = consensus[-1]
+                if tail.basis in ("refusal", "no_answer"):
+                    # reset so the next chunk gets no false-adjacency hint
+                    last_phase = None
+                else:
+                    last_phase = tail.phase or last_phase
+            phases = stitch_phases(digest_judgements)
+            audit = VerifierAudit(ran=False)
+            if verify_on and phases:
+                verifier = judges[0][1]
+                if verifier_model is not None:
+                    verifier = (
+                        verifier_model
+                        if isinstance(verifier_model, Model)
+                        else get_model(verifier_model)
+                    )
+                phases, audit = await verify_phases(
+                    verifier,
+                    spec,
+                    task_prompt=task_prompt,
+                    digests=digests,
+                    digest_judgements=digest_judgements,
+                    phases=phases,
+                    phase_names=phase_names,
+                    chunk=verify_chunk,
+                    cache=cache,
+                    sample=verify_sample,
                 )
-            phases, audit = await verify_phases(
-                verifier,
-                spec,
-                task_prompt=task_prompt,
-                digests=digests,
-                digest_judgements=digest_judgements,
-                phases=phases,
-                phase_names=phase_names,
-                chunk=verify_chunk,
-                cache=cache,
-                sample=verify_sample,
-            )
-            audit.verifier_model = str(verifier)
-        if n_members > 1:
+                audit.verifier_model = str(verifier)
+            if n_members > 1:
+                for p in phases:
+                    if p.confidence_source != "verifier":
+                        p.confidence_source = "majority_vote"
+            anchor_of = {d.turn: d.event_id for d in digests}
             for p in phases:
-                if p.confidence_source != "verifier":
-                    p.confidence_source = "majority_vote"
-        anchor_of = {d.turn: d.event_id for d in digests}
-        for p in phases:
-            p.anchor_event_id = next(
-                (
-                    anchor_of[t]
-                    for t in range(p.turn_start, p.turn_end + 1)
-                    if anchor_of.get(t) is not None
-                ),
-                None,
-            )
-        narrator = NarratorAudit(ran=False)
-        if narrate and phases:
-            narrator = await narrate_phases(
-                judges[0][1],
-                spec,
-                task_prompt=task_prompt,
-                digests=digests,
-                phases=phases,
-                cache=cache,
-            )
-            narrator.narrator_model = factory_names[0]
+                p.anchor_event_id = next(
+                    (
+                        anchor_of[t]
+                        for t in range(p.turn_start, p.turn_end + 1)
+                        if anchor_of.get(t) is not None
+                    ),
+                    None,
+                )
+            narrator = NarratorAudit(ran=False)
+            if narrate and phases:
+                narrator = await narrate_phases(
+                    judges[0][1],
+                    spec,
+                    task_prompt=task_prompt,
+                    digests=digests,
+                    phases=phases,
+                    cache=cache,
+                )
+                narrator.narrator_model = factory_names[0]
+            # stamp the lane; phase indices are positions in the whole
+            # transcript's phase list, so a later lane's are offset
+            offset = len(all_phases)
+            for p in phases:
+                p.lane = lane_name
+            dense = _dense_turns(digest_judgements, phases, n_turns, n_members)
+            for t in dense:
+                t.lane = lane_name
+                if t.phase_index is not None:
+                    t.phase_index += offset
+            for v in votes:
+                v.lane = lane_name
+            all_phases.extend(phases)
+            all_turns.extend(dense)
+            all_votes.extend(votes)
+            if n_members > 1:
+                all_members.extend(
+                    CohortMember(
+                        model=name, roll=r, lane=lane_name, turns=member_rows[(name, r)]
+                    )
+                    for (name, r) in member_keys
+                )
+            audits.append(audit)
+            narrators.append(narrator)
+            total_turns += n_turns
+            total_digests += len(digest_judgements)
+        audit = _merge_verifier_audits(audits)
+        narrator = _merge_narrator_audits(narrators)
         cohort = Cohort()
         if n_members > 1:
             cohort = Cohort(
                 ran=True,
-                members=[
-                    CohortMember(model=name, roll=r, turns=member_rows[(name, r)])
-                    for (name, r) in member_keys
-                ],
-                vote=votes,
+                members=all_members,
+                vote=all_votes,
                 agreement=CohortAgreement(
                     n_members=n_members,
                     n_models=len(factory_names),
@@ -451,8 +495,9 @@ def decision_phases(
                 ),
             )
         explanation = (
-            f"{len(phases)} phases over {len(digest_judgements)} "
-            f"digest turns ({n_turns} orchestrator turns)"
+            f"{len(all_phases)} phases over {total_digests} "
+            f"digest turns ({total_turns} lane turns"
+            + (f" across {n_lanes} lanes)" if n_lanes > 1 else ")")
         )
         if n_members > 1:
             explanation += f" · cohort of {n_members} members"
@@ -462,13 +507,8 @@ def decision_phases(
                 {
                     "phase_names": list(phase_names),
                     "phase_vocab": cast(JsonValue, phase_vocab),
-                    "phases": [p.model_dump() for p in phases],
-                    "turns": [
-                        t.model_dump()
-                        for t in _dense_turns(
-                            digest_judgements, phases, n_turns, n_members
-                        )
-                    ],
+                    "phases": [p.model_dump() for p in all_phases],
+                    "turns": [t.model_dump() for t in all_turns],
                     "verifier": audit.model_dump(),
                     "narrator": narrator.model_dump(),
                     "judge_models": factory_names,
@@ -485,6 +525,7 @@ def decision_phases(
 def turn_digests(
     transcript: Any,
     snippet_chars: int = SNIPPET_CHARS,
+    lane: TimelineSpan | None = None,
 ) -> list[Digest]:
     """Build one digest per reasoning-bearing orchestrator turn.
 
@@ -500,11 +541,13 @@ def turn_digests(
             any object with compatible ``events``/``messages``).
         snippet_chars: Per-digest cap on turn text, on reasoning, and
             on each delegation string.
+        lane: The top-level lane to digest (`helpers.top_lanes`); None
+            is the single-lane transcript's one lane.
 
     Returns:
         ``Digest`` records in turn order.
     """
-    lanes = Lanes(transcript)
+    lanes = Lanes(transcript, lane)
     by_turn: dict[int, Digest] = {}
 
     def _digest(turn: int) -> Digest:
@@ -576,6 +619,41 @@ def agent_task_prompt(transcript: Any) -> str:
             continue  # known OpenClaw scaffold line (e.g. heartbeat poll)
         return " ".join(text.split())[:TASK_PROMPT_CHARS]
     return ""
+
+
+def lane_task_prompt(transcript: Any, lanes: Lanes) -> str:
+    """The task one lane's agent was given: the lane's own recorded
+    ``task_prompt`` (an episode importer stamps it on the span-begin
+    metadata), else the transcript-level `agent_task_prompt`."""
+    own = lanes.metadata.get("task_prompt") if lanes.metadata else None
+    if isinstance(own, str) and own.strip():
+        return " ".join(own.split())[:TASK_PROMPT_CHARS]
+    return agent_task_prompt(transcript)
+
+
+def _merge_verifier_audits(audits: list[VerifierAudit]) -> VerifierAudit:
+    """One transcript-level verifier audit over its lanes: counts summed,
+    ``ran`` when any lane's pass ran, the model from the first that did."""
+    ran = [a for a in audits if a.ran]
+    if not ran:
+        return VerifierAudit(ran=False)
+    merged = VerifierAudit(ran=True, verifier_model=ran[0].verifier_model)
+    for name in VerifierAudit.model_fields:
+        if name in ("ran", "verifier_model"):
+            continue
+        setattr(merged, name, sum(getattr(a, name) or 0 for a in ran))
+    return merged
+
+
+def _merge_narrator_audits(audits: list[NarratorAudit]) -> NarratorAudit:
+    ran = [a for a in audits if a.ran]
+    if not ran:
+        return NarratorAudit(ran=False)
+    return NarratorAudit(
+        ran=True,
+        n_fallback=sum(a.n_fallback for a in ran),
+        narrator_model=ran[0].narrator_model,
+    )
 
 
 def system_prompt(spec: Spec, task_prompt: str = "") -> str:

@@ -8,10 +8,11 @@ dataframes nor rendered reports should be treated as text-free exports.
 This module preserves:
 
 - **Same turn axis as everything else.** `_turn_excerpts` iterates
-  `helpers.orchestrator_turns`, the one enumeration every scanner
-  numbers by, so turn *n* here is turn *n* on the charts, in the phase
-  ranges, and in the narrator's turn groups. Sub-agent turns are not
-  on that axis and never become excerpt rows: the cards show what the
+  `helpers.Lanes.turns`, the one enumeration every scanner numbers by
+  (per top-level lane on an episode), so turn *n* here is turn *n* on
+  the charts, in the phase ranges, and in the narrator's turn groups.
+  Sub-agent turns are not on that axis and never become excerpt rows:
+  the cards show what the
   judges read.
 - **Bounded page size.** A real run's groups span more than a thousand
   turns, so the whole store is never inlined: only turns inside a turn
@@ -37,8 +38,8 @@ from inspect_scout import TranscriptContent, transcripts_from
 from transect.scanners.helpers import (
     Lanes,
     message_reasoning,
-    orchestrator_turns,
     span_task_text,
+    top_lanes,
 )
 
 TEXT_CHARS = 400
@@ -122,11 +123,25 @@ class TranscriptExtras:
             section's own per-span spawn-task text.
         tool_counts: `_tool_call_counts` output - the phase cards'
             tool-call sort key + tag.
+        lane_excerpts / lane_tool_counts: the same two views per
+            top-level lane, keyed by lane name, for an episode's per-lane
+            cards; ``excerpts`` / ``tool_counts`` are the first agent
+            lane's (the only lane's on a conventional transcript).
     """
 
     excerpts: dict[int, Excerpt] = field(default_factory=dict)
     spawn_prompts: dict[str, SpawnPrompt] = field(default_factory=dict)
     tool_counts: dict[int, int] = field(default_factory=dict)
+    lane_excerpts: dict[str, dict[int, Excerpt]] = field(default_factory=dict)
+    lane_tool_counts: dict[str, dict[int, int]] = field(default_factory=dict)
+
+    def excerpts_for(self, lane: str | None) -> dict[int, Excerpt]:
+        """One lane's excerpts; the single lane's when ``lane`` is None."""
+        return self.excerpts if lane is None else self.lane_excerpts.get(lane, {})
+
+    def tool_counts_for(self, lane: str | None) -> dict[int, int]:
+        """One lane's tool counts; the single lane's when ``lane`` is None."""
+        return self.tool_counts if lane is None else self.lane_tool_counts.get(lane, {})
 
 
 def mark_compaction_turns(
@@ -272,11 +287,7 @@ async def _read(location: str, wanted: set[str]) -> dict[str, TranscriptExtras]:
             # grain the module docstring's honesty claim is about.
             try:
                 transcript = await reader.read(info, content)
-                found[info.transcript_id] = TranscriptExtras(
-                    excerpts=_turn_excerpts(transcript),
-                    spawn_prompts=_spawn_prompts(transcript),
-                    tool_counts=_tool_call_counts(transcript),
-                )
+                found[info.transcript_id] = _extras(transcript)
             except Exception as failure:
                 print(
                     f"WARNING: transcript excerpts unavailable for "
@@ -286,7 +297,34 @@ async def _read(location: str, wanted: set[str]) -> dict[str, TranscriptExtras]:
     return found
 
 
-def _turn_excerpts(transcript: Any, text_chars: int = TEXT_CHARS) -> dict[int, Excerpt]:
+def _extras(transcript: Any) -> TranscriptExtras:
+    """Every extra of one read transcript, per lane and for the first
+    agent lane (the only lane of a conventional transcript)."""
+    lane_excerpts: dict[str, dict[int, Excerpt]] = {}
+    lane_tool_counts: dict[str, dict[int, int]] = {}
+    spawn_prompts: dict[str, SpawnPrompt] = {}
+    first: str | None = None
+    for top in top_lanes(transcript):
+        lanes = Lanes(transcript, top)
+        if lanes.kind != "agent":
+            continue
+        if first is None:
+            first = lanes.name
+        lane_excerpts[lanes.name] = _turn_excerpts(transcript, lane=lanes)
+        lane_tool_counts[lanes.name] = _tool_call_counts(lanes)
+        spawn_prompts.update(_spawn_prompts(lanes))
+    return TranscriptExtras(
+        excerpts=lane_excerpts.get(first or "", {}),
+        spawn_prompts=spawn_prompts,
+        tool_counts=lane_tool_counts.get(first or "", {}),
+        lane_excerpts=lane_excerpts,
+        lane_tool_counts=lane_tool_counts,
+    )
+
+
+def _turn_excerpts(
+    transcript: Any, text_chars: int = TEXT_CHARS, lane: Lanes | None = None
+) -> dict[int, Excerpt]:
     """Excerpt every orchestrator turn of one transcript that carries
     text or reasoning-block content.
 
@@ -305,12 +343,14 @@ def _turn_excerpts(transcript: Any, text_chars: int = TEXT_CHARS) -> dict[int, E
     Args:
         transcript: The transcript to read (anything with ``events``).
         text_chars: Per-turn character cap.
+        lane: The resolved lane to excerpt; None resolves the single lane.
 
     Returns:
         ``{turn: Excerpt}`` for the turns carrying text or reasoning.
     """
     found: dict[int, Excerpt] = {}
-    for turn, event, calls in orchestrator_turns(transcript):
+    lanes = lane if lane is not None else Lanes(transcript)
+    for turn, event, calls in lanes.turns():
         message = event.output.message
         raw = (getattr(message, "text", None) or "") if message else ""
         text = " ".join(raw.split())
@@ -328,7 +368,7 @@ def _turn_excerpts(transcript: Any, text_chars: int = TEXT_CHARS) -> dict[int, E
     return found
 
 
-def _spawn_prompts(transcript: Any) -> dict[str, SpawnPrompt]:
+def _spawn_prompts(lanes: Any) -> dict[str, SpawnPrompt]:
     """Each sub-agent span's own spawn prompt, in full, keyed by
     ``agent_span_id``. Uncapped: the expandable exists for a human to
     read the whole task. The judge's own capped copy fills in per span
@@ -351,12 +391,13 @@ def _spawn_prompts(transcript: Any) -> dict[str, SpawnPrompt]:
     gets.
 
     Args:
-        transcript: The transcript to read (anything with ``events``).
+        lanes: The resolved lane whose sub-agent spans are read, or a
+            transcript (its single lane is resolved).
 
     Returns:
         ``{agent_span_id: SpawnPrompt}`` for the spans with task text.
     """
-    lanes = Lanes(transcript)
+    lanes = _as_lanes(lanes)
     found: dict[str, SpawnPrompt] = {}
     for begin in lanes.begins:
         text, _source = span_task_text(begin, lanes.first_models.get(begin.id))
@@ -365,7 +406,7 @@ def _spawn_prompts(transcript: Any) -> dict[str, SpawnPrompt]:
     return found
 
 
-def _tool_call_counts(transcript: Any) -> dict[int, int]:
+def _tool_call_counts(lanes: Any) -> dict[int, int]:
     """Per-turn tool-call counts on the same `helpers.orchestrator_turns`
     axis the excerpts use - every orchestrator turn, text-bearing or not
     (a tool-only turn has calls but no excerpt), so the phase cards can
@@ -375,11 +416,13 @@ def _tool_call_counts(transcript: Any) -> dict[int, int]:
     orchestrator's own model turns record; a sub-agent's tool calls are
     its own (`frames.lane_activity`, the subagents frame).
     """
-    return {
-        turn: len(calls)
-        for turn, _event, calls in orchestrator_turns(transcript)
-        if calls
-    }
+    lanes = _as_lanes(lanes)
+    return {turn: len(calls) for turn, _event, calls in lanes.turns() if calls}
+
+
+def _as_lanes(value: Any) -> Lanes:
+    """A resolved lane as given, or a transcript's single lane."""
+    return value if isinstance(value, Lanes) else Lanes(value)
 
 
 def _run_sync(coroutine):

@@ -78,11 +78,13 @@ from transect.frames.common import (
     CALL_STATUSES,
     IDENTITY_COLS,
     JUDGE_COLS,
+    LANE_COLS,
     VERIFIER_COLS,
     categorical,
     identity,
     joined_judge_models,
     judge_identity,
+    lane_of_judged,
     result_value,
     verifier_review,
     with_schema,
@@ -142,6 +144,7 @@ def phases_df(
             rows.append(
                 {
                     **identity_cols,
+                    **lane_of_judged(phase),
                     "phase_index": index,
                     **phase,
                     "verifier_reviews": phase.get("verifier_reviews"),
@@ -156,6 +159,7 @@ def phases_df(
             )
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "phase_index",
         "phase",
         "turn_start",
@@ -226,12 +230,19 @@ def _new_work_rollup(
     ):
         return pd.Series(pd.NA, index=phases.index, dtype="Float64")
     orchestrator = token_timeline[token_timeline.turn.notna()]
-    per_turn = orchestrator.groupby(
-        ["transcript_id", "turn"], as_index=False
-    ).new_work.sum()
+    # a turn number repeats across an episode's lanes: join on the lane too
+    # when both sides carry one (a store without lanes joins as before)
+    keys = ["transcript_id", "turn"]
+    if (
+        "lane" in phase_turns.columns
+        and "lane" in token_timeline.columns
+        and phase_turns.lane.notna().any()
+    ):
+        keys = ["transcript_id", "lane", "turn"]
+    per_turn = orchestrator.groupby(keys, as_index=False, dropna=False).new_work.sum()
     rollup = (
-        phase_turns[["transcript_id", "turn", "phase_index"]]
-        .merge(per_turn, on=["transcript_id", "turn"], how="left")
+        phase_turns[[*keys, "phase_index"]]
+        .merge(per_turn, on=keys, how="left")
         .dropna(subset=["phase_index"])
         .groupby(["transcript_id", "phase_index"], as_index=False)
         .new_work.sum(min_count=1)
@@ -259,12 +270,15 @@ def _delegated_rollup(
         )
     spend: list[Any] = []
     counts: list[int] = []
+    by_lane = "lane" in subagents.columns and "lane" in phases.columns
     for p in phases.itertuples():
         members = subagents[
             (subagents.transcript_id == p.transcript_id)
             & (subagents.spawn_turn >= p.turn_start)
             & (subagents.spawn_turn <= p.turn_end)
         ]
+        if by_lane and p.lane is not None and not pd.isna(p.lane):
+            members = members[members.lane == p.lane]
         counts.append(len(members))
         spend.append(members.new_work.sum(min_count=1) if len(members) else pd.NA)
     return (

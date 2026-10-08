@@ -40,6 +40,14 @@ IDENTITY_COLS = {
 LANE_COLS = ("lane", "lane_kind")
 
 
+def lane_of_judged(entry: dict) -> dict:
+    """The lane columns of a judged entry (a phase, a dense turn, a
+    cohort member): its lane, which is an agent lane by construction (the
+    world lane is never judged); None on stores scanned before lanes."""
+    lane = entry.get("lane")
+    return {"lane": lane, "lane_kind": "agent" if lane is not None else None}
+
+
 def lane_cols(entry: dict) -> dict:
     """The lane columns of a stored per-lane entry (None on stores
     scanned before lanes existed)."""

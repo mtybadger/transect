@@ -60,6 +60,14 @@ class Layer:
         audit: ``(unit_col, label_col)`` opt in to an entity block in
             the report's reliability audit. Needs a frame carrying the
             judge-identity columns (stamped by `transect.cohort_llm_scanner`).
+        scope: Where the section renders on a multi-agent episode:
+            ``"transcript"`` (the default) once per report unit, the frame
+            cut to the transcript, exactly as before lanes existed;
+            ``"lane"`` once per agent lane, the frame cut to that lane
+            (it must carry a ``lane`` column); ``"episode"`` once, in the
+            episode overview ahead of the lanes, the frame cut to the
+            transcript. On a conventional transcript ``"lane"`` and
+            ``"episode"`` both render once.
     """
 
     name: str
@@ -69,6 +77,7 @@ class Layer:
     tags: bool | list[str] | dict[str, str] = field(default=False)
     audit: tuple[str, str] | None = None
     scanner_args: dict[str, Any] = field(default_factory=dict)
+    scope: str = "transcript"
 
 
 def validate_layers(layers: list[Layer], builtin_frames: tuple[str, ...] = ()) -> None:
@@ -108,6 +117,11 @@ def validate_layers(layers: list[Layer], builtin_frames: tuple[str, ...] = ()) -
         if layer.name in SECTION_KEYS:
             raise ValueError(
                 f"{where} collides with the report section key {layer.name!r}"
+            )
+        if layer.scope not in ("transcript", "lane", "episode"):
+            raise ValueError(
+                f"{where}: scope must be transcript, lane or episode, "
+                f"got {layer.scope!r}"
             )
         if not isinstance(layer.tags, (bool, list, dict)):
             raise ValueError(

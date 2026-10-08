@@ -17,7 +17,14 @@ Empty outside the voting regimes (``cohort.ran`` false, solo judge).
 
 import pandas as pd
 
-from transect.frames.common import IDENTITY_COLS, identity, result_value, with_schema
+from transect.frames.common import (
+    IDENTITY_COLS,
+    LANE_COLS,
+    identity,
+    lane_of_judged,
+    result_value,
+    with_schema,
+)
 
 
 def phase_turn_votes_df(results: pd.DataFrame) -> pd.DataFrame:
@@ -34,6 +41,7 @@ def phase_turn_votes_df(results: pd.DataFrame) -> pd.DataFrame:
                 rows.append(
                     {
                         **identity_cols,
+                        **lane_of_judged(member),
                         "turn": t["turn"],
                         "model": member.get("model"),
                         "roll": member.get("roll"),
@@ -42,7 +50,16 @@ def phase_turn_votes_df(results: pd.DataFrame) -> pd.DataFrame:
                         "confidence": t.get("confidence") if judged else None,
                     }
                 )
-    columns = [*IDENTITY_COLS, "turn", "model", "roll", "basis", "phase", "confidence"]
+    columns = [
+        *IDENTITY_COLS,
+        *LANE_COLS,
+        "turn",
+        "model",
+        "roll",
+        "basis",
+        "phase",
+        "confidence",
+    ]
     df = pd.DataFrame(rows, columns=columns)
     df = df.astype({"turn": "Int64", "roll": "Int64", "confidence": "float64"})
     return with_schema(df)

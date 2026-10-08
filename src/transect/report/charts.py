@@ -2058,3 +2058,176 @@ _SPEND_LABEL_MAX_CHARS = 24
 _SPEND_ROW_PX = 30
 _SPEND_MARGIN_TOP = 8
 _SPEND_MARGIN_BOTTOM = 34  # room for the token x-axis + its label
+
+
+# ---------------------------------------------------------------- episode
+
+_EPISODE_WIDTH = 1180
+_EPISODE_MARGIN_LEFT = _SWIMLANE_MARGIN_LEFT
+_EPISODE_ROW_PX = 30
+_EPISODE_MIN_HIT_PX = 7.0  # a point event's hover footprint, in pixels
+_EPISODE_TURN_HALF = 0.22  # a turn box's half-height, in row units
+_EPISODE_TIP_FIELDS = ("what", "lane", "time", "who", "text")
+
+
+def episode_lanes(
+    turns: pd.DataFrame,
+    points: pd.DataFrame,
+    lanes: list[str],
+    span_s: float,
+    x_label: str,
+) -> tuple[Component, int]:
+    """Every lane of an episode on one wall-clock axis.
+
+    ``turns``: one row per agent model turn with ``row`` (the lane's row
+    index), ``x1`` / ``x2`` (seconds since episode start, start and
+    completion), ``color`` (a hex, phase colour or unjudged grey) and the
+    five `_EPISODE_TIP_FIELDS` columns. ``points``: one row per point
+    event - a delivery into an agent lane, a channel message or a world
+    action in the world lane - with ``row``, ``x`` (seconds), ``kind``
+    (delivery / message / action), ``color`` and the same tip fields.
+    ``lanes`` are the row labels in row order; ``span_s`` the axis extent.
+
+    Shapes: turns are boxes centred on their row; deliveries triangles
+    above the row's boxes; messages ticks (coloured by channel) in the
+    world row's upper half; actions dots in its lower half. One invisible
+    `rect` over every element answers hover for all of them (the
+    "one mark draws, another answers" idiom of `swimlanes`), so the
+    visible marks carry no tip and the plot has one channel-key set.
+    `color_scale="identity"`: every colour is a per-row hex column.
+    """
+    n_rows = max(len(lanes), 1)
+    plot_w = _EPISODE_WIDTH - _EPISODE_MARGIN_LEFT - 24
+    min_hit = span_s * _EPISODE_MIN_HIT_PX / max(plot_w, 1)
+    marks: list[Mark] = []
+    hits: list[pd.DataFrame] = []
+    channels = {field: f"tip_{i}" for i, field in enumerate(_EPISODE_TIP_FIELDS)}
+
+    def tips(frame: pd.DataFrame) -> pd.DataFrame:
+        out = pd.DataFrame(index=frame.index)
+        for i, field in enumerate(_EPISODE_TIP_FIELDS):
+            out[f"tip_{i}"] = frame[field].astype(object)
+        return out
+
+    if len(turns):
+        boxes = turns.copy()
+        boxes["y1"] = boxes.row - _EPISODE_TURN_HALF
+        boxes["y2"] = boxes.row + _EPISODE_TURN_HALF
+        marks.append(
+            rect(
+                Data.from_dataframe(boxes[["x1", "x2", "y1", "y2", "color"]]),
+                x1="x1",
+                x2="x2",
+                y1="y1",
+                y2="y2",
+                fill="color",
+                stroke=_SWIMLANE_BOX_STROKE,
+                stroke_width=0.5,
+            )
+        )
+        hit = tips(boxes)
+        hit["hx1"] = boxes.x1
+        hit["hx2"] = (
+            boxes[["x1", "x2"]]
+            .max(axis=1)
+            .where(boxes.x2 - boxes.x1 >= min_hit, boxes.x1 + min_hit)
+        )
+        hit["y1"], hit["y2"] = boxes.y1, boxes.y2
+        hits.append(hit)
+    if len(points):
+        deliveries = points[points.kind == "delivery"]
+        if len(deliveries):
+            frame = deliveries.copy()
+            frame["y"] = frame.row - 0.4
+            marks.append(
+                dot(
+                    Data.from_dataframe(frame[["x", "y", "color"]]),
+                    x="x",
+                    y="y",
+                    fill="color",
+                    symbol="triangle",
+                    r=3.2,
+                )
+            )
+            hit = tips(frame)
+            hit["hx1"], hit["hx2"] = frame.x - min_hit / 2, frame.x + min_hit / 2
+            hit["y1"], hit["y2"] = frame.row - 0.5, frame.row - 0.25
+            hits.append(hit)
+        messages = points[points.kind == "message"]
+        if len(messages):
+            frame = messages.copy()
+            frame["y1"], frame["y2"] = frame.row - 0.45, frame.row + 0.02
+            marks.append(
+                rule_x(
+                    Data.from_dataframe(frame[["x", "y1", "y2", "color"]]),
+                    x="x",
+                    y1="y1",
+                    y2="y2",
+                    stroke="color",
+                    stroke_width=_TICK_STROKE_WIDTH,
+                )
+            )
+            hit = tips(frame)
+            hit["hx1"], hit["hx2"] = frame.x - min_hit / 2, frame.x + min_hit / 2
+            hit["y1"], hit["y2"] = frame.y1, frame.y2
+            hits.append(hit)
+        actions = points[points.kind == "action"]
+        if len(actions):
+            frame = actions.copy()
+            frame["y"] = frame.row + 0.3
+            marks.append(
+                dot(
+                    Data.from_dataframe(frame[["x", "y", "color"]]),
+                    x="x",
+                    y="y",
+                    fill="color",
+                    symbol="circle",
+                    r=2.4,
+                )
+            )
+            hit = tips(frame)
+            hit["hx1"], hit["hx2"] = frame.x - min_hit / 2, frame.x + min_hit / 2
+            hit["y1"], hit["y2"] = frame.row + 0.1, frame.row + 0.5
+            hits.append(hit)
+    if hits:
+        hit_frame = pd.concat(hits, ignore_index=True)
+        marks.append(
+            rect(
+                Data.from_dataframe(
+                    hit_frame[["hx1", "hx2", "y1", "y2", *channels.values()]]
+                ),
+                x1="hx1",
+                x2="hx2",
+                y1="y1",
+                y2="y2",
+                opacity=0,  # hit-target only
+                tip=True,  # 2-D pointer: rows stack, so the hovered row matters
+                channels=channels,
+            )
+        )
+    label_frame = pd.DataFrame(
+        {"x": [0.0] * len(lanes), "y": list(range(len(lanes))), "label": lanes}
+    )
+    marks.append(
+        text(
+            Data.from_dataframe(label_frame),
+            x="x",
+            y="y",
+            text="label",
+            styles=TextStyles(text_anchor="end", font_size=11),
+            dx=-8,
+        )
+    )
+    height_px = 40 + _EPISODE_ROW_PX * n_rows
+    component = plot(
+        *marks,
+        width=_EPISODE_WIDTH,
+        height=height_px,
+        y_axis=False,  # not None - see module docstring
+        y_domain=(n_rows - 0.5, -0.5),
+        x_domain=(0.0, max(span_s, 1.0)),
+        x_label=x_label,
+        margin_left=_EPISODE_MARGIN_LEFT,
+        color_scale=_IDENTITY_SCALE,  # per-row hex columns
+    )
+    return component, _section_height(height_px, len(_EPISODE_TIP_FIELDS))

@@ -252,6 +252,13 @@ Inspect's log format already records concurrent agents this way;
 Top to bottom, everything on the orchestrator's turn axis (sub-agents
 appear as swimlanes placed by wall-clock, never as turns of their own):
 
+- **Lane navigation and lazy charts**: a multi-agent episode renders its
+  lanes as collapsed units behind a sticky row of lane chips (click one to
+  open and jump; expand all / collapse all). Every chart section loads its
+  runtime only when scrolled into view and unloads it when far away, so a
+  report with dozens of sections stays light. Layer tables are plain
+  sortable HTML. The Episode timeline is drawn in the page: scroll to
+  zoom, drag to pan, double-click to reset, hover for detail.
 - **Flags**: a red flag at the very top marks scan execution failures; it
   links to the run-wide "Scan execution & coverage" section at the bottom,
   which also tables the judges' own token usage.

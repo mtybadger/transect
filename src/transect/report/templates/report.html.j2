@@ -21,12 +21,21 @@
     resolution for laptop-screen reading. -#}
 <p class="meta"><label title="Renders each chart at its full authored width (higher per-turn resolution) inside a horizontal scroll box, instead of scaling it down to fit the window."><input type="checkbox" id="transect-zoom-toggle" onchange="_transectApplyFit()"> zoomed-in charts (scroll horizontally)</label></p>
 {% if not transcripts %}<p>No transcripts in results.</p>{% endif %}
+{%- if transcripts|length > 1 %}
+{#- Lane navigation: one chip per report unit (the episode first, then
+    each lane). A click opens that unit and scrolls to it; the chips
+    stay at the top of the viewport. -#}
+<nav class="lane-nav" aria-label="Report units">
+{%- for t in transcripts %}<a href="#{{ t.anchor }}" onclick="_transectOpenUnit('{{ t.anchor }}')">{{ t.nav_label }}</a>{% endfor %}
+<button type="button" onclick="_transectToggleUnits(true)">expand all</button><button type="button" onclick="_transectToggleUnits(false)">collapse all</button>
+</nav>
+{%- endif %}
 {% for t in transcripts %}
-<div class="transcript">
-<h2>{{ t.heading }}</h2>
+<details class="transcript" id="{{ t.anchor }}"{% if t.open %} open{% endif %}>
+<summary><h2>{{ t.heading }}</h2></summary>
 {% if t.run_meta %}{{ t.run_meta }}{% endif %}
 {% for section in t.sections %}{{ section }}{% endfor %}
-</div>
+</details>
 {% endfor %}
 {% include "scan_status.html.j2" %}
 {#- Provenance footer: the mark, the producing package + version,
@@ -37,6 +46,244 @@
     screen. -#}
 <button id="transect-back-top" onclick="window.scrollTo({top: 0, behavior: 'smooth'})" title="Back to the top of the page">&uarr; Back to top</button>
 <script>
+// Chart iframes load lazily: each carries its document in
+// data-transect-srcdoc; it is copied into srcdoc when the iframe comes
+// within _LAZY_MARGIN of the viewport and removed again once the iframe
+// is far away, so at most _LAZY_LIVE chart runtimes exist at a time
+// (every srcdoc document boots its own Mosaic/DuckDB instance). A
+// collapsed <details> keeps its iframes unloaded.
+var _LAZY_LIVE = 6;
+var _transectVisibleFrames = new Set();
+var _transectLiveFrames = [];
+function _transectLoadFrame(frame) {
+  if (frame.getAttribute("srcdoc")) return;
+  frame.setAttribute("srcdoc", frame.getAttribute("data-transect-srcdoc"));
+  frame.classList.remove("transect-lazy");
+  _transectLiveFrames.push(frame);
+  while (_transectLiveFrames.length > _LAZY_LIVE) {
+    var idle = _transectLiveFrames.findIndex(function(f) { return !_transectVisibleFrames.has(f); });
+    if (idle < 0) break;
+    var old = _transectLiveFrames.splice(idle, 1)[0];
+    old.removeAttribute("srcdoc");
+    old.classList.add("transect-lazy");
+  }
+}
+function _transectWatchFrames() {
+  var frames = document.querySelectorAll("iframe[data-transect-srcdoc]");
+  if (!("IntersectionObserver" in window)) {
+    frames.forEach(_transectLoadFrame);
+    return;
+  }
+  var io = new IntersectionObserver(function(entries) {
+    entries.forEach(function(e) {
+      if (e.isIntersecting) { _transectVisibleFrames.add(e.target); _transectLoadFrame(e.target); }
+      else { _transectVisibleFrames.delete(e.target); }
+    });
+    _transectQueueFit();
+  }, {rootMargin: "600px 0px"});
+  frames.forEach(function(f) { io.observe(f); });
+}
+document.addEventListener("DOMContentLoaded", _transectWatchFrames);
+
+// Report units (<details class="transcript">): the lane navigation
+// opens a unit before jumping to it; expand/collapse all toggles every
+// unit (an opened unit's charts load as they scroll into view).
+function _transectOpenUnit(id) {
+  var unit = document.getElementById(id);
+  if (unit && unit.tagName === "DETAILS") unit.open = true;
+}
+function _transectToggleUnits(open) {
+  document.querySelectorAll("details.transcript").forEach(function(d) { d.open = open; });
+  _transectQueueFit();
+}
+// a phase-card deep link into a collapsed lane opens the lane first
+function _transectOpenUnitOfHash() {
+  var hash = location.hash;
+  if (!hash) return;
+  var target = document.getElementById(hash.slice(1));
+  var unit = target && target.closest ? target.closest("details.transcript") : null;
+  if (unit) unit.open = true;
+}
+window.addEventListener("hashchange", _transectOpenUnitOfHash);
+document.addEventListener("DOMContentLoaded", _transectOpenUnitOfHash);
+
+// Static layer tables (.relmap.sortable): click a header to sort by
+// that column, numeric when every cell parses, click again to reverse.
+function _transectSortTable(th) {
+  var table = th.closest("table");
+  var idx = Array.prototype.indexOf.call(th.parentNode.children, th);
+  var tbody = table.tBodies[0];
+  var rows = Array.prototype.slice.call(tbody.rows);
+  var asc = th.getAttribute("data-sort") !== "asc";
+  var values = rows.map(function(r) { return r.cells[idx] ? r.cells[idx].textContent.trim() : ""; });
+  var numeric = values.every(function(v) { return v === "" || !isNaN(parseFloat(v.replace(/,/g, ""))); });
+  rows.sort(function(a, b) {
+    var va = a.cells[idx] ? a.cells[idx].textContent.trim() : "";
+    var vb = b.cells[idx] ? b.cells[idx].textContent.trim() : "";
+    var cmp = numeric
+      ? (parseFloat(va.replace(/,/g, "")) || 0) - (parseFloat(vb.replace(/,/g, "")) || 0)
+      : va.localeCompare(vb);
+    return asc ? cmp : -cmp;
+  });
+  rows.forEach(function(r) { tbody.appendChild(r); });
+  Array.prototype.forEach.call(th.parentNode.children, function(h) { h.removeAttribute("data-sort"); });
+  th.setAttribute("data-sort", asc ? "asc" : "desc");
+}
+
+// The episode chart: drawn here from the JSON in #<id>-data (see
+// report/episode.py). x is the compressed axis in seconds; segments map
+// it back to real seconds since episode start for the labels. Wheel
+// zooms about the cursor, drag pans, double-click resets.
+var _episodes = {};
+function _transectEpisode(id) {
+  var root = document.getElementById(id);
+  var data = JSON.parse(document.getElementById(id + "-data").textContent);
+  var st = {id: id, root: root, data: data, d0: 0, d1: data.span, drag: null};
+  _episodes[id] = st;
+  var svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Episode timeline");
+  root.insertBefore(svg, root.firstChild);
+  st.svg = svg;
+  svg.addEventListener("wheel", function(e) {
+    e.preventDefault();
+    var g = _epGeom(st);
+    var px = _epMouseX(st, e);
+    var frac = Math.min(1, Math.max(0, (px - g.left) / g.plotW));
+    var cursor = st.d0 + frac * (st.d1 - st.d0);
+    var k = Math.exp(e.deltaY * 0.0015);
+    var w = Math.min(st.data.span, Math.max(2, (st.d1 - st.d0) * k));
+    var d0 = cursor - frac * w;
+    d0 = Math.max(0, Math.min(st.data.span - w, d0));
+    st.d0 = d0; st.d1 = d0 + w;
+    _epRender(st);
+  }, {passive: false});
+  svg.addEventListener("mousedown", function(e) {
+    if (e.button !== 0) return;
+    st.drag = {x: _epMouseX(st, e), d0: st.d0, d1: st.d1};
+    svg.classList.add("panning");
+  });
+  window.addEventListener("mousemove", function(e) {
+    if (!st.drag) return;
+    var g = _epGeom(st);
+    var dx = (_epMouseX(st, e) - st.drag.x) / g.plotW * (st.drag.d1 - st.drag.d0);
+    var w = st.drag.d1 - st.drag.d0;
+    var d0 = Math.max(0, Math.min(st.data.span - w, st.drag.d0 - dx));
+    st.d0 = d0; st.d1 = d0 + w;
+    _epRender(st);
+  });
+  window.addEventListener("mouseup", function() { st.drag = null; svg.classList.remove("panning"); });
+  svg.addEventListener("dblclick", function() { _transectEpisodeReset(id); });
+  var tip = root.querySelector(".tip");
+  svg.addEventListener("mousemove", function(e) {
+    var el = e.target.closest ? e.target.closest("[data-tip]") : null;
+    if (!el) { tip.style.display = "none"; return; }
+    tip.textContent = el.getAttribute("data-tip");
+    tip.style.display = "block";
+    var r = root.getBoundingClientRect();
+    var x = e.clientX - r.left + 14, y = e.clientY - r.top + 14;
+    if (x + tip.offsetWidth > r.width) x = Math.max(0, e.clientX - r.left - tip.offsetWidth - 14);
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  });
+  svg.addEventListener("mouseleave", function() { tip.style.display = "none"; });
+  _epRender(st);
+}
+function _transectEpisodeReset(id) {
+  var st = _episodes[id]; if (!st) return;
+  st.d0 = 0; st.d1 = st.data.span; _epRender(st);
+}
+function _epGeom(st) {
+  var W = 1180, LEFT = 150, RIGHT = 24, TOP = 34, ROW = 28, BOTTOM = 30;
+  var n = st.data.lanes.length;
+  return {W: W, left: LEFT, right: RIGHT, top: TOP, row: ROW, plotW: W - LEFT - RIGHT,
+          H: TOP + ROW * n + BOTTOM, n: n};
+}
+function _epMouseX(st, e) {
+  var r = st.svg.getBoundingClientRect();
+  var g = _epGeom(st);
+  return (e.clientX - r.left) / r.width * g.W;
+}
+function _epReal(st, x) {
+  var segs = st.data.segments;
+  for (var i = 0; i < segs.length; i++) {
+    if (x <= segs[i].a1) return segs[i].r0 + Math.max(0, x - segs[i].a0);
+  }
+  var last = segs[segs.length - 1];
+  return last ? last.r0 + (last.a1 - last.a0) : x;
+}
+function _epLabel(s) {
+  s = Math.round(s);
+  if (s >= 3600) return Math.floor(s / 3600) + "h" + ("0" + Math.floor((s % 3600) / 60)).slice(-2) + "m";
+  return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2);
+}
+function _epEsc(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+}
+function _epRender(st) {
+  var g = _epGeom(st), d = st.data, d0 = st.d0, d1 = st.d1, w = d1 - d0;
+  var x = function(v) { return g.left + (v - d0) / w * g.plotW; };
+  var out = [];
+  out.push('<defs><clipPath id="' + st.id + '-clip"><rect x="' + g.left + '" y="0" width="' + g.plotW + '" height="' + g.H + '"/></clipPath></defs>');
+  // axis: nice ticks in axis seconds, labelled with the real offset
+  var steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+  var step = steps[steps.length - 1];
+  for (var i = 0; i < steps.length; i++) { if (w / steps[i] <= 14) { step = steps[i]; break; } }
+  out.push('<line x1="' + g.left + '" x2="' + (g.W - g.right) + '" y1="' + (g.top - 6) + '" y2="' + (g.top - 6) + '" stroke="currentColor" stroke-opacity="0.4"/>');
+  out.push('<text x="8" y="' + (g.top - 12) + '" fill="currentColor" fill-opacity="0.7" font-size="10">start ' + _epEsc(d.start) + (d.gaps.length ? " (gaps collapsed)" : "") + "</text>");
+  for (var t = Math.ceil(d0 / step) * step; t <= d1; t += step) {
+    var px = x(t);
+    out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (g.top - 6) + '" y2="' + (g.H - 30) + '" stroke="currentColor" stroke-opacity="0.07"/>');
+    out.push('<text x="' + px.toFixed(1) + '" y="' + (g.top - 12) + '" text-anchor="middle" font-size="10" fill="currentColor" fill-opacity="0.8">+' + _epLabel(_epReal(st, t)) + "</text>");
+  }
+  out.push('<g clip-path="url(#' + st.id + '-clip)">');
+  d.gaps.forEach(function(gp) {
+    if (gp.x < d0 || gp.x > d1) return;
+    var px = x(gp.x);
+    out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (g.top - 4) + '" y2="' + (g.H - 30) + '" stroke="#999" stroke-dasharray="3,3"/>');
+    out.push('<text x="' + px.toFixed(1) + '" y="' + (g.H - 16) + '" text-anchor="middle" font-size="10" fill="#777">' + _epEsc(gp.label) + "</text>");
+  });
+  d.lanes.forEach(function(lane, i) {
+    var mid = g.top + i * g.row + g.row / 2;
+    out.push('<line x1="' + g.left + '" x2="' + (g.W - g.right) + '" y1="' + mid + '" y2="' + mid + '" stroke="currentColor" stroke-opacity="0.12"/>');
+  });
+  var minW = w / g.plotW * 1.5;
+  d.turns.forEach(function(tn) {
+    if (tn.x2 < d0 || tn.x1 > d1) return;
+    var top = g.top + tn.row * g.row;
+    var x1 = x(tn.x1), x2 = x(Math.max(tn.x2, tn.x1 + minW));
+    out.push('<rect x="' + x1.toFixed(1) + '" y="' + (top + 7) + '" width="' + Math.max(1.5, x2 - x1).toFixed(1) + '" height="14" rx="1" fill="' + tn.color + '" stroke="#fff" stroke-width="0.5" data-tip="' + _epEsc(tn.tip) + '"/>');
+  });
+  d.points.forEach(function(pt) {
+    if (pt.x < d0 || pt.x > d1) return;
+    var top = g.top + pt.row * g.row, px = x(pt.x);
+    if (pt.kind === "delivery") {
+      out.push('<path d="M' + (px - 4).toFixed(1) + ',' + (top + 1) + ' L' + (px + 4).toFixed(1) + ',' + (top + 1) + ' L' + px.toFixed(1) + ',' + (top + 7) + ' Z" fill="' + pt.color + '" data-tip="' + _epEsc(pt.tip) + '"/>');
+    } else if (pt.kind === "message") {
+      out.push('<line x1="' + px.toFixed(1) + '" x2="' + px.toFixed(1) + '" y1="' + (top + 3) + '" y2="' + (top + 14) + '" stroke="' + pt.color + '" stroke-width="2.5" data-tip="' + _epEsc(pt.tip) + '"/>');
+    } else {
+      out.push('<circle cx="' + px.toFixed(1) + '" cy="' + (top + 21) + '" r="2.6" fill="' + pt.color + '" data-tip="' + _epEsc(pt.tip) + '"/>');
+    }
+  });
+  out.push("</g>");
+  d.lanes.forEach(function(lane, i) {
+    var mid = g.top + i * g.row + g.row / 2 + 4;
+    var label = lane.kind === "agent" ? lane.name : lane.name + " (world)";
+    if (lane.anchor) {
+      out.push('<a href="#' + lane.anchor + '" onclick="_transectOpenUnit(\'' + lane.anchor + '\')"><text x="8" y="' + mid + '" font-size="11" fill="#104D6A" text-decoration="underline">' + _epEsc(label) + "</text></a>");
+    } else {
+      out.push('<text x="8" y="' + mid + '" font-size="11" fill="currentColor">' + _epEsc(label) + "</text>");
+    }
+  });
+  st.svg.setAttribute("viewBox", "0 0 " + g.W + " " + g.H);
+  st.svg.innerHTML = out.join("");
+  var range = document.getElementById(st.id + "-range");
+  if (range) {
+    range.textContent = (w >= d.span - 0.5)
+      ? "whole episode"
+      : "showing +" + _epLabel(_epReal(st, d0)) + " to +" + _epLabel(_epReal(st, d1));
+  }
+}
+
 // Band chunks link to their phase card (href target="_parent", ids
 // transcript-scoped "#phase-<idx>-<n>"). Fragment navigation scrolls;
 // this additionally opens the target <details> (native auto-open is

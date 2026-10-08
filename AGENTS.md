@@ -157,6 +157,17 @@ scanner change take effect; run a new scan and retain both results for compariso
   chart in the browser. Read it before writing or reviewing any chart
   code; the long docstrings in `report/` encode these findings and
   should not be trimmed.
+- Chart iframes are lazy: `embed._embed` writes the document into
+  `data-transect-srcdoc`, and the page script (`report.html.j2`) copies
+  it into `srcdoc` near the viewport and evicts it far away, keeping at
+  most `_LAZY_LIVE` chart runtimes alive. A report unit is a
+  `<details class="transcript">`; an episode's lanes start collapsed
+  behind the `.lane-nav`. Custom `Table` blocks render as static
+  sortable HTML (`custom._html_table`), never as a chart runtime. The
+  episode chart is client-drawn SVG from JSON (`report/episode.py` +
+  `_transectEpisode`), with zoom and pan - the one chart that is not an
+  inspect-viz plot, because it needs interaction Plot does not offer and
+  must not cost a runtime.
 - `embed.py`'s pixel constants are real-browser measurements; the
   comments say what was measured and how to re-measure.
 - Verify report changes in a real browser, not only via tests: chart

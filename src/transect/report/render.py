@@ -83,7 +83,14 @@ def render_report(
     units = _render_units(order, results.lanes)
     for idx, (transcript_id, lane, opens_episode) in enumerate(units):
         if opens_episode:
-            transcripts.append(_episode_entry(results, transcript_id, phase_colors))
+            anchors = {
+                str(unit_lane): f"unit-{unit_idx}"
+                for unit_idx, (unit_tid, unit_lane, _opens) in enumerate(units)
+                if unit_tid == transcript_id and unit_lane is not None
+            }
+            transcripts.append(
+                _episode_entry(results, transcript_id, phase_colors, anchors)
+            )
         one = _mine(timeline, transcript_id, lane)
         # the orchestrator's rows: the turn axis every chart draws on
         main = one[one.turn.notna()]
@@ -397,6 +404,11 @@ def render_report(
                 "heading": _unit_title(one, my_info, lane),
                 "run_meta": sections.run_intro_line(my_info),
                 "sections": sections_html,
+                # an episode's lanes start collapsed behind the lane
+                # navigation; a conventional transcript is open as before
+                "open": lane is None,
+                "nav_label": lane if lane is not None else _short_title(one),
+                "anchor": f"unit-{idx}",
             }
         )
 
@@ -755,7 +767,10 @@ def _render_units(
 
 
 def _episode_entry(
-    results: TransectResults, transcript_id: str, phase_colors: dict | None = None
+    results: TransectResults,
+    transcript_id: str,
+    phase_colors: dict | None = None,
+    lane_anchors: dict[str, str] | None = None,
 ) -> dict:
     """The episode overview, rendered as its own titled entry ahead of
     the episode's per-lane entries."""
@@ -768,6 +783,7 @@ def _episode_entry(
             _mine(results.lane_events, transcript_id),
             phase_turns=_mine(results.phase_turns, transcript_id),
             phase_colors={k: v[0] for k, v in (phase_colors or {}).items()},
+            lane_anchors=lane_anchors or {},
         )
     ]
     main = timeline[timeline.turn.notna()]
@@ -787,7 +803,19 @@ def _episode_entry(
         "heading": f"Episode · {_transcript_title(timeline, info)}",
         "run_meta": sections.run_intro_line(info),
         "sections": episode_sections,
+        "open": True,
+        "nav_label": "Episode",
+        "anchor": f"episode-{_slug(transcript_id)}",
     }
+
+
+def _short_title(one: pd.DataFrame) -> str:
+    """A transcript's navigation label: its sample id."""
+    return str(one.sample_id.iloc[0]) if len(one) else "transcript"
+
+
+def _slug(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "-" for ch in str(value))
 
 
 def _unit_title(one: pd.DataFrame, info: pd.DataFrame, lane: str | None) -> str:

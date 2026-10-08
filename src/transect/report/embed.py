@@ -34,7 +34,10 @@ def _embed(component: Component, height_px: int, extra_head: str) -> str:
     """One chart section's component tree -> one iframe.
 
     `_document` returns a complete document (inspect_viz's `to_html`
-    shape), so every embedded chart is a whole srcdoc document.
+    shape), so every embedded chart is a whole srcdoc document - loaded
+    lazily: the page script moves ``data-transect-srcdoc`` into
+    ``srcdoc`` when the iframe nears the viewport and evicts it when it
+    leaves, keeping the number of live chart runtimes bounded.
 
     `_TIP_POINTER_CSS` and `_TIP_CLAMP_HEAD` are spliced in
     unconditionally (hovering does not work without the first, tooltips
@@ -70,9 +73,15 @@ def _embed(component: Component, height_px: int, extra_head: str) -> str:
     doc = doc.replace("</head>", f"{head}</head>", 1)
     width = _widest_plot(component.config)
     width_css = f"{width}px" if width else "100%"
+    # the document rides in data-transect-srcdoc, not srcdoc: the page
+    # script (report.html.j2) copies it across when the iframe scrolls
+    # near the viewport and drops it again when it scrolls far away, so a
+    # report with many sections never boots more than a few chart runtimes
+    # at once (each srcdoc document is a whole Mosaic/DuckDB instance)
     iframe = (
         f'<iframe height="{height_px}" style="width:{width_css};border:none" '
-        f'srcdoc="{html_escape.escape(doc, quote=True)}"></iframe>'
+        'class="transect-lazy" title="chart (loads when scrolled into view)" '
+        f'data-transect-srcdoc="{html_escape.escape(doc, quote=True)}"></iframe>'
     )
     return f'<div class="{CHART_SCROLL_CLASS}" style="overflow-x:auto">{iframe}</div>'
 

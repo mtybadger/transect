@@ -106,6 +106,13 @@ def layer_section(
             flush_pending()
             fragments.append(_markdown(block, ctx))
             continue
+        if isinstance(block, b.Table):
+            # a plain sortable HTML table, not a DuckDB-backed widget: a
+            # layer table per lane on an episode would otherwise be one
+            # chart runtime each
+            flush_pending()
+            fragments.append(_html_table(block, _block_frame(block, frame, ctx)))
+            continue
         components, height, after = _viz_block(block, frame, ctx)
         pending.extend(components)
         if after is not None:
@@ -158,6 +165,87 @@ def _viz_block(block, own: pd.DataFrame | None, ctx: SectionContext):
         component, height = _event_marks(block, frame, ctx)
         return [component], height, None
     raise ValueError(f"unrenderable block {type(block).__name__}")
+
+
+_TABLE_ROW_CAP = 400
+
+
+def _block_frame(block, own: pd.DataFrame | None, ctx: SectionContext) -> pd.DataFrame:
+    """The frame a block renders: its own override cut to the transcript,
+    else the layer's slice."""
+    frame = own
+    if isinstance(block.frame, pd.DataFrame):
+        frame = block.frame
+        if "transcript_id" in frame.columns:
+            frame = frame[frame.transcript_id == ctx.transcript_id]
+    if frame is None:
+        raise RuntimeError(
+            f"{type(block).__name__} block reached render with no frame - "
+            "load-time validation should have refused this layer"
+        )
+    return frame
+
+
+def _html_table(block: b.Table, frame: pd.DataFrame) -> Markup:
+    """A static table (``.relmap.sortable``): click a header to sort.
+    Long text cells wrap; rows past `_TABLE_ROW_CAP` are counted, not
+    rendered (the frame itself is the complete record)."""
+    columns = block.columns or [str(c) for c in frame.columns]
+    rows = frame[columns].head(_TABLE_ROW_CAP)
+    head = "".join(
+        f'<th class="sortable" onclick="_transectSortTable(this)">{escape(c)}</th>'
+        for c in columns
+    )
+    body = []
+    for record in rows.to_dict("records"):
+        cells = []
+        for c in columns:
+            value = record.get(c)
+            text = _cell_text(value)
+            numeric = (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and not pd.isna(value)
+            )
+            cls = (
+                ' class="num"'
+                if numeric
+                else (' class="text"' if len(text) > 60 else "")
+            )
+            cells.append(f"<td{cls}>{escape(text)}</td>")
+        body.append("<tr>" + "".join(cells) + "</tr>")
+    more = (
+        f'<p class="meta">{len(frame) - len(rows)} more row(s) in the frame, not shown.</p>'
+        if len(frame) > len(rows)
+        else ""
+    )
+    return Markup(
+        '<div class="relmap-scroll"><table class="relmap sortable"><thead><tr>'
+        + head
+        + "</tr></thead><tbody>"
+        + "".join(body)
+        + "</tbody></table></div>"
+        + more
+    )
+
+
+def _cell_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float):
+        return (
+            f"{value:.3g}"
+            if abs(value) < 1
+            else f"{value:,.2f}".rstrip("0").rstrip(".")
+        )
+    if isinstance(value, (list, dict)):
+        return str(value)[:300]
+    return str(value)
 
 
 def _tip_name(column: str) -> str:

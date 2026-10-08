@@ -53,6 +53,48 @@ h3 {{ font-size: var(--transect-font-size-small); font-weight: 600; }}
    the audit's heading hierarchy reads top-down */
 h4 {{ font-size: var(--transect-font-size-smaller); font-weight: 600; }}
 .phase-cards {{ overflow-wrap: anywhere; }}
+details.event, .section {{ scroll-margin-top: 3rem; }}
+/* report units: an episode's lanes collapse behind the lane navigation */
+details.transcript {{ scroll-margin-top: 3rem; }}  /* clear the sticky lane nav */
+details.transcript > summary {{ list-style: none; cursor: pointer; }}
+details.transcript > summary::-webkit-details-marker {{ display: none; }}
+details.transcript > summary h2 {{ display: inline-block; margin-top: 1.6rem; }}
+details.transcript > summary h2::before {{ content: "\25B8"; display: inline-block;
+  width: 1.1em; color: var(--transect-color-muted); font-size: 0.8em; }}
+details.transcript[open] > summary h2::before {{ content: "\25BE"; }}
+.lane-nav {{ position: sticky; top: 0; z-index: 20; background: #fff;
+  border-bottom: 1px solid var(--transect-color-border); padding: 6px 0;
+  margin: 0.5rem 0 1rem; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+.lane-nav a {{ font-size: 0.8rem; text-decoration: none; padding: 2px 9px;
+  border: 1px solid var(--transect-color-border); border-radius: 10px;
+  background: var(--transect-chip-bg); color: var(--transect-color-link); }}
+.lane-nav a:hover {{ background: var(--transect-color-hover); }}
+.lane-nav button {{ font-size: 0.75rem; margin-left: 4px; padding: 2px 8px;
+  border: 1px solid var(--transect-color-border); border-radius: 10px; background: #fff;
+  color: var(--transect-color-muted); cursor: pointer; }}
+/* a chart iframe before its document is loaded */
+iframe.transect-lazy {{ background: repeating-linear-gradient(135deg, #fafafa, #fafafa 12px,
+  #f2f2f4 12px, #f2f2f4 24px); }}
+/* static layer tables */
+.relmap th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
+.relmap th.sortable[data-sort="asc"]::after {{ content: " \25B4"; }}
+.relmap th.sortable[data-sort="desc"]::after {{ content: " \25BE"; }}
+.relmap td.text {{ white-space: normal; min-width: 22rem; max-width: 40rem;
+  text-align: left; font-size: 0.75rem; }}
+.relmap td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+/* the episode chart */
+.episode-chart {{ position: relative; }}
+.episode-chart svg {{ display: block; width: 100%; height: auto; cursor: grab; }}
+.episode-chart svg.panning {{ cursor: grabbing; }}
+.episode-chart .tip {{ position: absolute; pointer-events: none; z-index: 30;
+  background: #fff; border: 1px solid var(--transect-color-border); border-radius: 4px;
+  padding: 6px 9px; font-size: 0.78rem; max-width: 34rem; box-shadow: 0 2px 8px rgba(0,0,0,.12);
+  display: none; white-space: pre-wrap; }}
+.episode-controls {{ font-size: 0.78rem; color: var(--transect-color-muted);
+  display: flex; gap: 8px; align-items: center; margin: 4px 0; }}
+.episode-controls button {{ font-size: 0.75rem; padding: 2px 8px;
+  border: 1px solid var(--transect-color-border); border-radius: 10px; background: #fff;
+  cursor: pointer; }}
 .meta {{ color: var(--transect-color-muted); font-size: 0.85rem; }}
 /* chart how-to-read lines: one step below .meta, so explainers cede
    visual space to the charts they explain */

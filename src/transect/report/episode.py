@@ -10,21 +10,20 @@ reached it, all placed by recorded timestamp. The axis is wall clock
 without gap compression: an idle stretch is drawn at its true length,
 because waiting is part of the behaviour.
 
-The chart is `charts.episode_lanes`, an inspect-viz plot like every other
-chart section, so hover tooltips, embedding and sizing follow the rest of
-the report; this module only shapes the frames it draws.
+The chart is inline SVG drawn in the page by the report script
+(`_transectEpisode` in report.html.j2) from JSON this module emits, so it
+zooms and pans and costs no chart runtime; this module shapes the data.
 """
 
+import json
 from datetime import datetime, timedelta
 
 import pandas as pd
 from markupsafe import Markup, escape
 
 from transect.frames import spine
-from transect.report import charts, sections
+from transect.report import sections
 from transect.report.colors import _UNJUDGED_GREY
-from transect.report.embed import embed_section
-from transect.report.style import _WIDGET_STYLE_CSS
 
 DELIVERY_FILL = "#f28e2b"
 WORLD_FILL = "#8c8c8c"
@@ -49,10 +48,17 @@ def episode_overview_section(
     events: pd.DataFrame,
     phase_turns: pd.DataFrame | None = None,
     phase_colors: dict[str, str] | None = None,
+    lane_anchors: dict[str, str] | None = None,
 ) -> Markup:
-    """The whole Episode timeline section for one transcript."""
+    """The whole Episode timeline section for one transcript.
+
+    The chart is drawn in the page by `_transectEpisode` (report.html.j2)
+    from the JSON this emits: lanes, turn boxes, point events, the
+    compressed axis's segments and gaps. Drawing client-side is what
+    makes the chart zoomable and pannable (wheel and drag over the plot,
+    double-click to reset) without a chart runtime per section.
+    """
     rows = _lane_rows(lanes)
-    labels = [name if kind == "agent" else f"{name} (world)" for name, kind in rows]
     row_of = {name: index for index, (name, _kind) in enumerate(rows)}
     t0, t1 = _bounds(lanes, timeline, events)
     span_s = max((t1 - t0).total_seconds(), 1.0)
@@ -64,29 +70,53 @@ def episode_overview_section(
     if axis.gaps:
         turns = turns.assign(x1=turns.x1.map(axis.map), x2=turns.x2.map(axis.map))
         points = points.assign(x=points.x.map(axis.map))
-    component, height = charts.episode_lanes(
-        turns,
-        points,
-        labels,
-        axis.span,
-        x_label=(
-            f"time since episode start ({t0.strftime('%Y-%m-%d %H:%M:%S %Z')})"
-            + (
-                f"; idle stretches over {int(GAP_MIN_S)} s collapsed"
-                if axis.gaps
-                else ", seconds"
-            )
-        ),
-        axis_labels=axis.labels_frame() if axis.gaps else None,
-        gaps=axis.gaps_frame() if axis.gaps else None,
-    )
     judged = phase_turns is not None and len(phase_turns) > 0
+    anchors = lane_anchors or {}
+    data = {
+        "lanes": [
+            {"name": name, "kind": kind, "anchor": anchors.get(name)}
+            for name, kind in rows
+        ],
+        "span": axis.span,
+        "start": t0.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "segments": [
+            {"a0": start + offset, "a1": end + offset, "r0": start}
+            for (start, end), offset in zip(axis.segments, axis.offsets, strict=True)
+        ],
+        "gaps": [
+            {"x": x, "label": f"{_offset_label(seconds)} idle"}
+            for x, seconds in axis.gaps
+        ],
+        "turns": [
+            {
+                "row": int(r["row"]),
+                "x1": round(float(r["x1"]), 2),
+                "x2": round(float(r["x2"]), 2),
+                "color": r["color"],
+                "tip": _tip(r),
+            }
+            for r in turns.to_dict("records")
+        ],
+        "points": [
+            {
+                "row": int(r["row"]),
+                "x": round(float(r["x"]), 2),
+                "kind": r["kind"],
+                "color": r["color"],
+                "tip": _tip(r),
+            }
+            for r in points.to_dict("records")
+        ],
+    }
+    chart_id = (
+        f"episode-{abs(hash((t0.isoformat(), len(turns), len(points)))) % 10**8:08d}"
+    )
     compression_note = (
         f" Idle stretches with no activity in any lane for over {int(GAP_MIN_S)} "
-        "seconds are collapsed to a dashed gap captioned with their length; "
-        "the labels along the bottom give the time at each resumption."
+        "seconds are collapsed to a dashed gap captioned with their length; the "
+        "axis labels give the time since episode start at each position."
         if axis.gaps
-        else " Time is recorded wall clock with no gap compression."
+        else " Time is recorded wall clock."
     )
     intro = Markup(
         "<p>Every top-level lane of this transcript on one wall-clock axis: "
@@ -95,13 +125,24 @@ def episode_overview_section(
         "start to completion"
         + (", coloured by judged phase" if judged else "")
         + ") with the deliveries that verifiably entered its context "
-        "(triangles)." + compression_note + " Hover any element for its detail.</p>"
+        "(triangles)."
+        + compression_note
+        + " Scroll to zoom, drag to pan, double-click to reset; hover any "
+        "element for its detail; click a lane name to open that lane's "
+        "section.</p>"
     )
-    blocks: list[Markup | None] = [
-        intro,
-        Markup(embed_section([component], height, extra_head=_WIDGET_STYLE_CSS)),
-        _glyph_legend(),
-    ]
+    payload = json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
+    chart = Markup(
+        f'<div class="episode-controls"><button type="button" '
+        f"onclick=\"_transectEpisodeReset('{chart_id}')\">reset zoom</button>"
+        f'<span id="{chart_id}-range"></span></div>'
+        f'<div class="episode-chart" id="{chart_id}">'
+        f'<script type="application/json" id="{chart_id}-data">{payload}</script>'
+        f'<div class="tip"></div></div>'
+        f'<script>document.addEventListener("DOMContentLoaded", function() '
+        f"{{ _transectEpisode('{chart_id}'); }});</script>"
+    )
+    blocks: list[Markup | None] = [intro, chart, _glyph_legend()]
     if judged and phase_colors:
         counts = {
             str(label): int(n)
@@ -110,6 +151,20 @@ def episode_overview_section(
         blocks.append(sections.label_chips(counts, phase_colors))
     blocks.append(_lane_table(lanes, timeline, events))
     return sections.section("Episode timeline", blocks)
+
+
+def _tip(row: dict) -> str:
+    """One element's tooltip text: what, lane, time, who, text, one per line."""
+    parts = [
+        str(row.get("what") or ""),
+        f"lane: {row.get('lane')}",
+        str(row.get("time") or ""),
+    ]
+    if row.get("who"):
+        parts.append(str(row["who"]))
+    if row.get("text"):
+        parts.append(str(row["text"]))
+    return "\n".join(p for p in parts if p)
 
 
 class CompressedAxis:

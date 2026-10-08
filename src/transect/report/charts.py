@@ -2230,11 +2230,14 @@ def episode_lanes(
     if gaps is not None and len(gaps):
         gap_frame = gaps.copy()
         gap_frame["y"] = -0.5
+        # a plain rule at x: this axis is seconds, not turns, so the
+        # half-turn offset of `_offset_rule_x` does not apply
         marks.append(
-            _offset_rule_x(
+            rule_x(
                 Data.from_dataframe(gap_frame[["x"]]),
-                "#999",
-                "3,3",
+                x="x",
+                stroke="#999",
+                stroke_dasharray="3,3",
                 pointer_events="none",
             )
         )

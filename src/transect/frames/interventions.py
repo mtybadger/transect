@@ -1,6 +1,7 @@
 """interventions_df: mid-run human interventions.
 
-Columns (identity prefix explained in common.py):
+Columns (identity prefix explained in common.py; lane / lane_kind: the
+top-level lane, see token_timeline.py):
 
 - turn: 0-based orchestrator turn the intervention precedes.
 - channel: how the human reached the run -
@@ -39,7 +40,13 @@ Columns (identity prefix explained in common.py):
 
 import pandas as pd
 
-from transect.frames.common import IDENTITY_COLS, identity, result_value, with_schema
+from transect.frames.common import (
+    IDENTITY_COLS,
+    LANE_COLS,
+    identity,
+    result_value,
+    with_schema,
+)
 
 
 def interventions_df(results: pd.DataFrame) -> pd.DataFrame:
@@ -51,6 +58,7 @@ def interventions_df(results: pd.DataFrame) -> pd.DataFrame:
             rows.append({**identity_cols, **i})
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "turn",
         "channel",
         "content",

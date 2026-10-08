@@ -1,6 +1,7 @@
 """flushes_df: context-window compaction events.
 
-Columns (identity prefix explained in common.py):
+Columns (identity prefix explained in common.py; lane / lane_kind: the
+top-level lane, see token_timeline.py):
 
 - turn: 0-based orchestrator turn the flush precedes (the first
   post-flush orchestrator turn, in event order), for a flush in any lane.
@@ -39,6 +40,7 @@ import pandas as pd
 
 from transect.frames.common import (
     IDENTITY_COLS,
+    LANE_COLS,
     identity,
     lane_series,
     result_value,
@@ -55,6 +57,7 @@ _INT_COLUMNS = (
     "messages_after",
 )
 _TEXT_COLUMNS = (
+    *LANE_COLS,
     "agent_span_id",
     "role",
     "strategy",
@@ -95,7 +98,7 @@ def flushes_df(results: pd.DataFrame, token_timeline: pd.DataFrame) -> pd.DataFr
             details = {name: f[name] for name in ("lane_turn", *_RECORDED_COLUMNS)}
             details.update({name: metadata.get(name) for name in _METADATA_COLUMNS})
             f = {**f, "tokens_after_inferred": False}
-            lane = lanes.get(_lane_key(f.get("agent_span_id")))
+            lane = lanes.get(_lane_key(f.get("agent_span_id"), f.get("lane")))
             if (
                 not f.get("tokens_after")
                 and f.get("tokens_before")
@@ -113,20 +116,27 @@ def flushes_df(results: pd.DataFrame, token_timeline: pd.DataFrame) -> pd.DataFr
     # same lane and stays below.
     recorded: dict[tuple[str, str], set[int]] = {}
     for row in rows:
-        key = (row["transcript_id"], _lane_key(row.get("agent_span_id")))
+        key = (
+            row["transcript_id"],
+            _lane_key(row.get("agent_span_id"), row.get("lane")),
+        )
         recorded.setdefault(key, set()).add(int(row["lane_turn"]))
     for transcript_id, lanes in lanes_of.items():
         for lane_key, lane in lanes.items():
             identity_row = lane.iloc[0]
             identity_cols = {ours: identity_row.get(ours) for ours in IDENTITY_COLS}
+            for col in LANE_COLS:
+                value = identity_row.get(col)
+                identity_cols[col] = None if value is None or pd.isna(value) else value
             nearby = recorded.get((transcript_id, lane_key), set())
-            span_id = None if lane_key == "__main__" else lane_key
+            span_id = None if lane_key.startswith("__main__") else lane_key
             rows.extend(
                 {**identity_cols, "agent_span_id": span_id, **drop}
                 for drop in _synthesized_drops(lane, nearby)
             )
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "turn",
         "agent_span_id",
         "lane_turn",
@@ -150,12 +160,14 @@ def flushes_df(results: pd.DataFrame, token_timeline: pd.DataFrame) -> pd.DataFr
     return with_schema(df)
 
 
-def _lane_key(agent_span_id) -> str:
-    return (
-        "__main__"
-        if agent_span_id is None or pd.isna(agent_span_id)
-        else str(agent_span_id)
-    )
+def _lane_key(agent_span_id, lane=None) -> str:
+    """The `lane_series` key of a flush: its sub-agent span, else its
+    top-level lane's main key ("__main__" on stores without lanes)."""
+    if agent_span_id is not None and not pd.isna(agent_span_id):
+        return str(agent_span_id)
+    if lane is not None and not pd.isna(lane):
+        return f"__main__:{lane}"
+    return "__main__"
 
 
 def _lane_frames(group: pd.DataFrame) -> dict[str, pd.DataFrame]:

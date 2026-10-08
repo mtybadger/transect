@@ -24,7 +24,7 @@ import pandas as pd
 from transect.scanners.cohort import CallStatus, LabelSource, VerifierReview
 from transect.scanners.phases_common import TurnBasis
 
-SCHEMA_VERSION = "0.2"
+SCHEMA_VERSION = "0.3"
 
 IDENTITY_COLS = {
     "sample_id": "transcript_task_id",
@@ -33,6 +33,18 @@ IDENTITY_COLS = {
     "transcript_id": "transcript_id",
     "agent": "transcript_agent",
 }
+
+# the lane columns every per-turn frame carries (0.3): a multi-agent
+# episode records several top-level lanes per transcript; a conventional
+# transcript has one, named after its orchestrator span
+LANE_COLS = ("lane", "lane_kind")
+
+
+def lane_cols(entry: dict) -> dict:
+    """The lane columns of a stored per-lane entry (None on stores
+    scanned before lanes existed)."""
+    return {"lane": entry.get("lane"), "lane_kind": entry.get("lane_kind")}
+
 
 # the standard judged-scanner identity columns
 JUDGE_COLS = (
@@ -102,6 +114,11 @@ def lane_series(per_turn: pd.DataFrame) -> pd.Series:
         return pd.Series("__main__", index=per_turn.index)
     key = per_turn.agent_span_id.astype(object).copy()
     spanless = key.isna()
+    if "lane" in per_turn.columns:
+        # each top-level lane is its own conversation
+        lane_key = "__main__:" + per_turn.lane.astype(object).astype(str)
+        key[spanless] = lane_key[spanless]
+        spanless = spanless & per_turn.lane.isna()
     if "turn" in per_turn.columns:
         off_axis = spanless & per_turn.turn.isna()
         key[off_axis] = [f"__offaxis_{index}" for index in per_turn.index[off_axis]]

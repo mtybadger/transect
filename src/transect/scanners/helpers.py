@@ -41,18 +41,61 @@ class Lanes:
     attributes events to lanes starts from one of these.
     """
 
-    def __init__(self, transcript: Any) -> None:
-        self.main = main_span(transcript)
-        self.begins, self.first_models = subagent_span_begins(transcript, self.main)
+    def __init__(self, transcript: Any, lane: TimelineSpan | None = None) -> None:
+        peers = top_lanes(transcript)
+        if lane is None:
+            if len(peers) > 1:
+                raise ValueError(_multi_lane_message(peers))
+            lane = peers[0]
+        self.main = lane
+        self.peers = peers
+        self.name: str = lane.name
+        self.lane_id: str = lane.id
         self.events: list[Any] = list(transcript.events)
         self._transcript = transcript
+        self._spans = {e.id: e for e in self.events if e.event == "span_begin"}
+        begin = self._spans.get(lane.id)
+        self.kind: str = lane_kind_of(begin)
+        self.metadata: dict[str, Any] = dict(getattr(begin, "metadata", None) or {})
+        self.begin_at = getattr(begin, "timestamp", None)
+        self.end_at = next(
+            (
+                getattr(e, "timestamp", None)
+                for e in self.events
+                if e.event == "span_end" and e.id == lane.id
+            ),
+            None,
+        )
+        # the other top-level lanes and everything nested under them: not
+        # this lane's events, never this lane's sub-agents
+        other_tops = {p.id for p in peers if p.id != lane.id}
+        self._foreign = frozenset(
+            other_tops
+            | {
+                sid
+                for sid in self._spans
+                if _has_ancestor_in(self._spans, sid, other_tops)
+            }
+        )
+        # the positional form when there is nothing to exclude: a
+        # single-lane transcript takes the historical call exactly
+        self.begins, self.first_models = (
+            subagent_span_begins(transcript, lane, exclude=self._foreign)
+            if self._foreign
+            else subagent_span_begins(transcript, lane)
+        )
         self.sub_ids = frozenset(begin.id for begin in self.begins)
         self._main_events = frozenset(
             id(item.event)
             for item in self.main.content
             if isinstance(item, TimelineEvent) and is_model_turn(item.event)
         )
-        self._spans = {e.id: e for e in self.events if e.event == "span_begin"}
+
+    def owns(self, event: Any) -> bool:
+        """Whether an event belongs to this lane's subtree. Events under
+        another top-level lane are foreign; span-less events (init,
+        scorer, root-level) belong to every lane."""
+        return getattr(event, "span_id", None) not in self._foreign
 
     def is_main(self, event: Any) -> bool:
         """Whether a model event is one of the orchestrator's own turns."""
@@ -85,6 +128,8 @@ class Lanes:
         call or a compaction."""
         turn = 0
         for event in self.events:
+            if not self.owns(event):
+                continue
             if is_model_turn(event) and self.is_main(event):
                 turn += 1
                 continue
@@ -127,13 +172,11 @@ def orchestrator_turns(transcript: Any) -> Iterator[tuple[int, Any, list[ToolCal
 
 
 def main_span(transcript: Any) -> TimelineSpan:
-    """Resolve the orchestrator's timeline span.
+    """Resolve the orchestrator's timeline span of a single-lane transcript.
 
     The span Scout's ``timeline_messages(..., depth=1)`` would scan: the
     outermost non-utility span holding a direct model event, container
     spans (the synthetic root, a solvers wrapper) being transparent.
-    Uses the transcript's stored timeline when present, else builds one
-    in place - importer/database sources arrive with ``timelines`` empty.
 
     Args:
         transcript: The transcript whose timeline is resolved.
@@ -141,28 +184,83 @@ def main_span(transcript: Any) -> TimelineSpan:
     Returns:
         The ``TimelineSpan`` whose direct content is the main lane.
 
-    A transcript with no events at all (a message history without its
-    event stream) resolves to its root: an empty orchestrator lane with
-    zero turns, the honest reading of a source that recorded no calls.
+    Raises:
+        ValueError: When the transcript has no model turn under a single
+            agent span, or when it has several top-level lanes (a
+            multi-agent episode) - callers that support lanes iterate
+            `top_lanes` instead.
+    """
+    lanes = top_lanes(transcript)
+    if len(lanes) == 1:
+        return lanes[0]
+    raise ValueError(_multi_lane_message(lanes))
+
+
+def top_lanes(transcript: Any) -> list[TimelineSpan]:
+    """Resolve the transcript's top-level lanes.
+
+    A lane is an agent whose model turns form their own axis. A
+    conventional transcript has one: the orchestrator (`main_span`).
+    A multi-agent episode has several siblings - peer agents recorded
+    as sibling ``agent`` spans, plus any span marked as a lane in its
+    span-begin metadata (``{"lane": "world"}``: the shared world, which
+    holds no model turns of its own). Sub-agents nested inside a lane
+    are not lanes.
+
+    Uses the transcript's stored timeline when present, else builds one
+    in place - importer/database sources arrive with ``timelines`` empty.
+
+    Returns:
+        The lanes in timeline order. A transcript with no events at all
+        resolves to its root: one empty lane with zero turns.
 
     Raises:
         ValueError: When the transcript has events but no model turn
-            under a single agent span - a sample that errored before its
-            first call, two or more top-level agents, or model calls only
-            inside utility spans. There is then no orchestrator lane to
-            number; the error is recorded per transcript and shown in
-            the scan status section.
+            under any agent span - a sample that errored before its
+            first call, or model calls only inside utility spans.
     """
     timelines = getattr(transcript, "timelines", None)
     timeline = timelines[0] if timelines else timeline_build(transcript.events)
+    marked = _marked_lane_ids(transcript)
     span = timeline.root
     while True:
-        if any(
-            isinstance(item, TimelineEvent) and is_model_turn(item.event)
+        if _has_direct_turn(span):
+            return [span]
+        agents = [
+            item
             for item in span.content
+            if isinstance(item, TimelineSpan)
+            and item.span_type == "agent"
+            and not item.utility
+        ]
+        agents.extend(
+            _pruned_marked_lanes(transcript, span, timeline.root, agents, marked)
+        )
+        with_models = [a for a in agents if _holds_model_events(a)]
+        if len(agents) >= 2 and (
+            len(with_models) >= 2 or any(a.id in marked for a in agents)
         ):
-            return span
-        children = [
+            return [
+                _descend(a) for a in agents if _holds_model_events(a) or a.id in marked
+            ]
+        if len(with_models) == 1:
+            span = with_models[0]
+            continue
+        if not with_models:
+            if not transcript.events:
+                return [span]  # no events at all: an empty lane
+            raise ValueError(
+                f"transcript has no model turns under its main span {span.name!r}; "
+                "there is no lane to number"
+            )
+        return [_descend(a) for a in with_models]
+
+
+def _descend(span: TimelineSpan) -> TimelineSpan:
+    """From a lane's outer span down through single-child wrappers to the
+    span holding its direct model turns."""
+    while not _has_direct_turn(span):
+        kids = [
             item
             for item in span.content
             if isinstance(item, TimelineSpan)
@@ -170,21 +268,78 @@ def main_span(transcript: Any) -> TimelineSpan:
             and not item.utility
             and _holds_model_events(item)
         ]
-        if len(children) == 1:
-            span = children[0]
-            continue
-        if not children:
-            if not transcript.events:
-                return span  # no events at all: an empty lane
-            raise ValueError(
-                f"transcript has no model turns under its main span {span.name!r}; "
-                "there is no orchestrator lane to number"
-            )
-        names = ", ".join(repr(child.name) for child in children)
-        raise ValueError(
-            f"transcript has {len(children)} top-level agents ({names}) and no "
-            "single orchestrator lane; transect numbers one orchestrator's turns"
-        )
+        if len(kids) != 1:
+            break
+        span = kids[0]
+    return span
+
+
+def _has_direct_turn(span: TimelineSpan) -> bool:
+    return any(
+        isinstance(item, TimelineEvent) and is_model_turn(item.event)
+        for item in span.content
+    )
+
+
+def _pruned_marked_lanes(
+    transcript: Any,
+    span: TimelineSpan,
+    root: TimelineSpan,
+    present: list[TimelineSpan],
+    marked: frozenset[str],
+) -> list[TimelineSpan]:
+    """Marked lanes the timeline tree does not show under ``span``, as
+    bare spans. The timeline builder prunes a span with no events in
+    view, and a scanner that loads no info events sees the world lane
+    (info events only) as exactly that; its span-begin event still
+    records it, so the lane is recovered from there."""
+    if not marked:
+        return []
+    parent = None if span is root else span.id
+    have = {a.id for a in present}
+    return [
+        TimelineSpan(id=e.id, name=e.name, span_type="agent")
+        for e in transcript.events
+        if e.event == "span_begin"
+        and e.id in marked
+        and e.id not in have
+        and getattr(e, "parent_id", None) == parent
+    ]
+
+
+def _marked_lane_ids(transcript: Any) -> frozenset[str]:
+    """Span ids whose span-begin metadata declares a lane kind."""
+    return frozenset(
+        e.id
+        for e in transcript.events
+        if e.event == "span_begin" and (getattr(e, "metadata", None) or {}).get("lane")
+    )
+
+
+def lane_kind_of(span_begin: Any) -> str:
+    """A lane's kind from its span-begin metadata: ``"world"`` for the
+    shared-world lane, ``"agent"`` otherwise (the default)."""
+    return str((getattr(span_begin, "metadata", None) or {}).get("lane") or "agent")
+
+
+def _multi_lane_message(lanes: list[TimelineSpan]) -> str:
+    names = ", ".join(repr(lane.name) for lane in lanes)
+    return (
+        f"transcript has {len(lanes)} top-level lanes ({names}) and no single "
+        "orchestrator; this code path numbers one lane at a time - iterate "
+        "transect.scanners.helpers.top_lanes(transcript)"
+    )
+
+
+def _has_ancestor_in(spans: dict[str, Any], span_id: str, targets: set[str]) -> bool:
+    seen: set[str] = set()
+    current = getattr(spans.get(span_id), "parent_id", None)
+    while current is not None and current not in seen:
+        if current in targets:
+            return True
+        seen.add(current)
+        current = getattr(spans.get(current), "parent_id", None)
+    return False
 
 
 def _holds_model_events(span: TimelineSpan) -> bool:
@@ -199,7 +354,7 @@ def _holds_model_events(span: TimelineSpan) -> bool:
 
 
 def subagent_span_begins(
-    transcript: Any, main: TimelineSpan
+    transcript: Any, main: TimelineSpan, exclude: frozenset[str] = frozenset()
 ) -> tuple[list[Any], dict[str, Any]]:
     """Sub-agent span_begin events + each span's first model event.
 
@@ -214,7 +369,10 @@ def subagent_span_begins(
 
     Args:
         transcript: The transcript whose events are scanned.
-        main: The main lane's span (see ``main_span``).
+        main: The lane's span (see ``main_span`` / ``top_lanes``).
+        exclude: Span ids that can never be this lane's sub-agents: the
+            other top-level lanes of a multi-agent episode and every
+            span nested under them.
 
     Returns:
         ``(span_begins, first_models)`` in event order.
@@ -234,6 +392,7 @@ def subagent_span_begins(
         and e.id != main.id
         and e.id not in ancestors
         and e.id not in utility_ids
+        and e.id not in exclude
     ]
     return begins, first_models
 

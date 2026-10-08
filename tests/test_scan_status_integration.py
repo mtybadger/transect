@@ -204,11 +204,11 @@ def test_an_unresolvable_orchestrator_lane_surfaces_as_a_scan_error(
 
     def ambiguous(transcript):
         raise ValueError(
-            "transcript has 2 top-level agents ('one', 'two') and no single "
-            "orchestrator lane; transect numbers one orchestrator's turns"
+            "transcript has 2 top-level lanes ('one', 'two') and no single "
+            "orchestrator; this code path numbers one lane at a time"
         )
 
-    monkeypatch.setattr(helpers, "main_span", ambiguous)
+    monkeypatch.setattr(helpers, "top_lanes", ambiguous)
     result = transect.transect(
         str(demo_log),
         transect.Spec(),
@@ -223,5 +223,5 @@ def test_an_unresolvable_orchestrator_lane_surfaces_as_a_scan_error(
     assert timeline.errors == 1
     assert result.token_timeline.empty
     readable = " ".join(_status_element(result.report_paths[0]).itertext())
-    assert "no single orchestrator lane" in readable
+    assert "no single orchestrator" in readable
     assert "'one', 'two'" in readable

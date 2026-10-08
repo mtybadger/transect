@@ -7,7 +7,8 @@ record (identity, axis coordinates) plus `lane_activity_df` and
 scans with no judge; the classification half left-joins onto it and is
 NaN otherwise.
 
-Columns (identity prefix explained in common.py):
+Columns (identity prefix explained in common.py; lane / lane_kind: the
+top-level lane the span nests under, see token_timeline.py):
 
 - agent_span_id / agent_lane: the sub-agent span (id / name).
 - spawn_turn: the orchestrator turn preceding the span's begin event
@@ -62,7 +63,7 @@ Columns (identity prefix explained in common.py):
 - schema_version: the frames contract version.
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -72,6 +73,7 @@ from transect.frames.common import (
     IDENTITY_COLS,
     JUDGE_COLS,
     LABEL_SOURCES,
+    LANE_COLS,
     VERIFIER_COLS,
     categorical,
     identity,
@@ -104,7 +106,7 @@ _SPINE_TEXT = ("turn_source", "started_at", "ended_at")
 # is the join key itself)
 _PART_IDENTITY = {
     col: (col, "first")
-    for col in (*IDENTITY_COLS, "agent_lane")
+    for col in (*IDENTITY_COLS, *LANE_COLS, "agent_lane")
     if col != "transcript_id"
 }
 
@@ -124,7 +126,11 @@ def subagents_df(
     spine = _structural_spine(timeline_results, lane_activity, token_timeline)
     # the judge rows' own copies of the identity and lane columns give
     # way to the spine's, which exist for every span the scan saw
-    drop = [c for c in (*IDENTITY_COLS, "agent_lane") if c != "transcript_id"]
+    drop = [
+        c
+        for c in (*IDENTITY_COLS, *LANE_COLS, "agent_lane")
+        if c != "transcript_id" and c in judge.columns
+    ]
     merged = spine.merge(
         judge.drop(columns=drop),
         on=["transcript_id", "agent_span_id"],
@@ -142,6 +148,7 @@ def subagents_df(
     merged["verifier_status"] = categorical(merged.verifier_status, CALL_STATUSES)
     ordered = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "agent_span_id",
         "agent_lane",
         "spawn_turn",
@@ -254,21 +261,34 @@ def _span_turns(timeline_results: pd.DataFrame | None) -> pd.DataFrame | None:
     for _, r in timeline_results.iterrows():
         identity_cols = identity(r)
         value = result_value(r["value"])
-        orchestrator = sorted(
-            (e for e in value.get("timeline") or [] if e.get("turn") is not None),
-            key=lambda e: e["turn"],
-        )
-        cells = spine.clock(
-            [e.get("timestamp") for e in orchestrator],
-            orchestrator[-1].get("completed") if orchestrator else None,
-        )
+        entries = value.get("timeline") or []
+        cells_of: dict[Any, list] = {}
         for record in value.get("spans") or []:
+            # the clock is the span's own top-level lane's turns
+            lane_name = record.get("lane")
+            if lane_name not in cells_of:
+                orchestrator = sorted(
+                    (
+                        e
+                        for e in entries
+                        if e.get("turn") is not None
+                        and (lane_name is None or e.get("lane") == lane_name)
+                    ),
+                    key=lambda e: e["turn"],
+                )
+                cells_of[lane_name] = spine.clock(
+                    [e.get("timestamp") for e in orchestrator],
+                    orchestrator[-1].get("completed") if orchestrator else None,
+                )
+            cells = cells_of[lane_name]
             end_recorded = bool(record.get("end_recorded"))
             started_at = record.get("first_at")
             ended_at = record.get("end_at") if end_recorded else record.get("last_at")
             rows.append(
                 {
                     **identity_cols,
+                    "lane": record.get("lane"),
+                    "lane_kind": record.get("lane_kind"),
                     "agent_span_id": record["agent_span_id"],
                     "agent_lane": record["agent_lane"],
                     "spawn_turn": record["spawn_turn"],

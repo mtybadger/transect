@@ -21,6 +21,7 @@ from transect.report._jinja import jinja_env
 from transect.report.colors import _UNJUDGED_GREY, _label_colors, _phase_colors
 from transect.report.display import MEMBER_NO_VOTE, member_display, multi_roll_models
 from transect.report.embed import embed_section
+from transect.report.episode import episode_overview_section
 from transect.report.excerpts import (
     SpawnPrompt,
     mark_compaction_turns,
@@ -32,6 +33,7 @@ from transect.tags import select_tags
 
 # The built-in sections' stable keys, in default reading order
 SECTION_KEYS = (
+    "episode_overview",
     "eval_setup",
     "phase_timeline",
     "interventions",
@@ -75,30 +77,38 @@ def render_report(
     # at render time, and the affected surfaces render without extras
     transcript_extras = read_transcript_extras(results.transcripts_location, order)
     transcripts = []
-    for idx, transcript_id in enumerate(order):
-        one = _mine(timeline, transcript_id)
+    # one report unit per (transcript, agent lane): a conventional
+    # transcript is one unit with lane None; a multi-agent episode is one
+    # unit per agent lane, preceded by its episode overview
+    units = _render_units(order, results.lanes)
+    for idx, (transcript_id, lane, opens_episode) in enumerate(units):
+        if opens_episode:
+            transcripts.append(_episode_entry(results, transcript_id))
+        one = _mine(timeline, transcript_id, lane)
         # the orchestrator's rows: the turn axis every chart draws on
         main = one[one.turn.notna()]
         n_turns = int(main.turn.max()) + 1 if len(main) else 0
-        my_info = _mine(results.transcript_info, transcript_id)
-        all_flushes = _mine(results.flushes, transcript_id).sort_values("turn")
+        my_info = _mine(results.transcript_info, transcript_id, lane)
+        all_flushes = _mine(results.flushes, transcript_id, lane).sort_values("turn")
         # charts, tags and the compaction excerpt marks read the
         # orchestrator's own compactions; a sub-agent lane's stay in
         # the frame (frames.flushes)
         my_flushes = all_flushes[all_flushes.agent_span_id.isna()]
         flush_turns = list(my_flushes.turn)
-        my_interventions = _mine(results.interventions, transcript_id).sort_values(
+        my_interventions = _mine(
+            results.interventions, transcript_id, lane
+        ).sort_values(
             "turn",
             kind="stable",  # several interventions can share a turn
         )
         intervention_turns = list(my_interventions.turn)
-        my_phases = _mine(results.phases, transcript_id)
-        my_turn_votes = _mine(results.phase_turn_votes, transcript_id)
-        my_definitions = _mine(results.label_definitions, transcript_id)
-        my_phase_turns = _mine(results.phase_turns, transcript_id)
-        my_subagents = _mine(results.subagents, transcript_id)
+        my_phases = _mine(results.phases, transcript_id, lane)
+        my_turn_votes = _mine(results.phase_turn_votes, transcript_id, lane)
+        my_definitions = _mine(results.label_definitions, transcript_id, lane)
+        my_phase_turns = _mine(results.phase_turns, transcript_id, lane)
+        my_subagents = _mine(results.subagents, transcript_id, lane)
         my_tags = (
-            _mine(results.turn_tags, transcript_id)
+            _mine(results.turn_tags, transcript_id, lane)
             if results.turn_tags is not None
             else None
         )
@@ -137,7 +147,7 @@ def render_report(
                 card_id_prefix,
                 my_turn_votes,
             )
-            my_groups = _mine(results.turn_groups, transcript_id)
+            my_groups = _mine(results.turn_groups, transcript_id, lane)
             # the scan's own per-turn tool counts when emitted, else
             # the render-time store read
             tool_counts: dict[int, int] | None = None
@@ -278,7 +288,7 @@ def render_report(
         add(("token_telemetry", sections.section("Token telemetry", token_blocks)))
         # 4. sub-agent activity (the votes slice is shared with the
         # audit section below)
-        my_subagent_votes = _mine(results.subagent_votes, transcript_id)
+        my_subagent_votes = _mine(results.subagent_votes, transcript_id, lane)
         lanes = _span_lanes(my_subagents, main)
         if lanes:
             subagent_section = _subagent_section(
@@ -380,7 +390,7 @@ def render_report(
 
         transcripts.append(
             {
-                "heading": _transcript_title(one, my_info),
+                "heading": _unit_title(one, my_info, lane),
                 "run_meta": sections.run_intro_line(my_info),
                 "sections": sections_html,
             }
@@ -700,9 +710,68 @@ def _chart(components: list, height_px: int) -> Markup:
     return Markup(embed_section(components, height_px, extra_head=_WIDGET_STYLE_CSS))
 
 
-def _mine(frame: pd.DataFrame, transcript_id: str) -> pd.DataFrame:
-    """This transcript's rows of one frame."""
-    return frame[frame.transcript_id == transcript_id]
+def _mine(
+    frame: pd.DataFrame, transcript_id: str, lane: str | None = None
+) -> pd.DataFrame:
+    """This transcript's rows of one frame; this lane's rows when ``lane``
+    is given and the frame carries lanes (per-transcript frames such as
+    transcript_info have none and return whole)."""
+    rows = frame[frame.transcript_id == transcript_id]
+    if lane is not None and "lane" in frame.columns:
+        rows = rows[rows.lane == lane]
+    return rows
+
+
+def _render_units(
+    order: list[str], lanes: pd.DataFrame
+) -> list[tuple[str, str | None, bool]]:
+    """The report units: ``(transcript_id, lane, opens_episode)``. A
+    transcript with several agent lanes (a multi-agent episode) yields
+    one unit per agent lane that has turns, the first flagged to render
+    the episode overview ahead of it; any other transcript is one unit
+    with lane None, rendered exactly as before lanes existed."""
+    units: list[tuple[str, str | None, bool]] = []
+    for transcript_id in order:
+        agent_lanes: list[str] = []
+        if len(lanes):
+            mine = lanes[lanes.transcript_id == transcript_id]
+            agent_lanes = [
+                str(lane)
+                for lane, kind, n in zip(
+                    mine.lane, mine.lane_kind, mine.n_turns, strict=True
+                )
+                if kind == "agent" and pd.notna(n) and n > 0
+            ]
+        if len(agent_lanes) > 1:
+            units.append((transcript_id, agent_lanes[0], True))
+            units.extend((transcript_id, lane, False) for lane in agent_lanes[1:])
+        else:
+            units.append((transcript_id, None, False))
+    return units
+
+
+def _episode_entry(results: TransectResults, transcript_id: str) -> dict:
+    """The episode overview, rendered as its own titled entry ahead of
+    the episode's per-lane entries."""
+    timeline = _mine(results.token_timeline, transcript_id)
+    info = _mine(results.transcript_info, transcript_id)
+    return {
+        "heading": f"Episode · {_transcript_title(timeline, info)}",
+        "run_meta": sections.run_intro_line(info),
+        "sections": [
+            episode_overview_section(
+                _mine(results.lanes, transcript_id),
+                timeline,
+                _mine(results.lane_events, transcript_id),
+            )
+        ],
+    }
+
+
+def _unit_title(one: pd.DataFrame, info: pd.DataFrame, lane: str | None) -> str:
+    """A unit's heading: the transcript title, plus its lane on an episode."""
+    title = _transcript_title(one, info)
+    return f"{title} · lane: {lane}" if lane is not None else title
 
 
 def _apply_order(

@@ -5,6 +5,9 @@ Columns (identity prefix explained in common.py):
 
 - turn: 0-based orchestrator turn; NA on a sub-agent's own turns (they
   are off the axis) and on init/scorer calls.
+- lane / lane_kind: the top-level lane the turn belongs to (its name,
+  and "agent" or "world"); a conventional transcript has one lane,
+  named after its orchestrator span. None on stores scanned before 0.3.
 - lane_turn: 0-based ordinal within the turn's own lane; NA on an
   off-axis call, which is in no lane.
 - n_tool_calls: tool calls requested by this turn's assistant message.
@@ -29,7 +32,9 @@ import pandas as pd
 
 from transect.frames.common import (
     IDENTITY_COLS,
+    LANE_COLS,
     identity,
+    lane_cols,
     lane_series,
     result_value,
     with_schema,
@@ -57,6 +62,7 @@ def token_timeline_df(results: pd.DataFrame) -> pd.DataFrame:
         for entry in timeline:
             row = {
                 **identity_cols,
+                **lane_cols(entry),
                 "turn": entry["turn"],
                 "lane_turn": entry["lane_turn"],
                 "n_tool_calls": entry.get("n_tool_calls"),
@@ -69,6 +75,7 @@ def token_timeline_df(results: pd.DataFrame) -> pd.DataFrame:
             rows.append(row)
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "turn",
         "lane_turn",
         "n_tool_calls",
@@ -86,6 +93,8 @@ def token_timeline_df(results: pd.DataFrame) -> pd.DataFrame:
             "n_tool_calls": "Int64",
             "timestamp": "string",
             "completed": "string",
+            "lane": "string",
+            "lane_kind": "string",
         }
     )
     if len(df):

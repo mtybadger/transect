@@ -34,6 +34,8 @@ from transect.frames import (
     interventions_df,
     label_definitions_df,
     lane_activity_df,
+    lane_events_df,
+    lanes_df,
     phase_turn_votes_df,
     phase_turns_df,
     phases_df,
@@ -60,6 +62,7 @@ from transect.scanners.base import (
     context_flush,
     eval_setup,
     human_intervention,
+    lane_events,
     token_timeline,
 )
 from transect.scanners.phases import decision_phases
@@ -306,6 +309,9 @@ def load(scans_dir: str, extra_layers: list[Layer] | None = None) -> TransectRes
                 and (key := scanner_key(layer.scanner)) in results.scanners
             },
         ),
+        lanes=lanes_df(raw),
+        # a store scanned before the lane_events scanner existed has none
+        lane_events=lane_events_df(results.scanners.get("lane_events", pd.DataFrame())),
         layer_frames=(mounted := _layer_frames(results, extra_layers or [])),
         turn_tags=turn_tags_frame(
             extra_layers or [], mounted, _n_turns(token_timeline)
@@ -528,6 +534,7 @@ def _scanners(
         context_flush(),
         human_intervention(),
         eval_setup(),
+        lane_events(),
     ]
     if judge_models is not None:
         if isinstance(judge_models, list) and not judge_models:

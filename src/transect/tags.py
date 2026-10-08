@@ -19,6 +19,8 @@ RESERVED_TAG_COLUMNS = (
         {
             "answer",
             "confidence",
+            "lane",
+            "lane_kind",
             "error",
             "explanation",
             "judge_agreement",

@@ -57,6 +57,14 @@ class TransectResults:
     """One row per (surface, label): the rubric the judges classified
     against."""
 
+    lanes: pd.DataFrame
+    """One row per top-level lane: the orchestrator of a conventional
+    transcript, or each participant plus the world of an episode."""
+
+    lane_events: pd.DataFrame
+    """One row per recorded lane event: deliveries, channel messages,
+    world actions, episode marks."""
+
     transcripts_location: str | None = None
     """Where the scan's transcripts live, the Scout viewer target."""
 

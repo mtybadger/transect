@@ -1,6 +1,7 @@
 """lane_activity_df: tool-events-only sub-agent activity.
 
-Columns (identity prefix explained in common.py):
+Columns (identity prefix explained in common.py; lane / lane_kind: the
+top-level lane, see token_timeline.py):
 
 - turn: 0-based orchestrator turn preceding the tool event, in event
   order (subagents.anchor_turn / end_turn place spans by wall-clock, so
@@ -16,7 +17,13 @@ Columns (identity prefix explained in common.py):
 
 import pandas as pd
 
-from transect.frames.common import IDENTITY_COLS, identity, result_value, with_schema
+from transect.frames.common import (
+    IDENTITY_COLS,
+    LANE_COLS,
+    identity,
+    result_value,
+    with_schema,
+)
 
 
 def lane_activity_df(results: pd.DataFrame) -> pd.DataFrame:
@@ -40,6 +47,7 @@ def lane_activity_df(results: pd.DataFrame) -> pd.DataFrame:
             )
     columns = [
         *IDENTITY_COLS,
+        *LANE_COLS,
         "turn",
         "agent_lane",
         "agent_span_id",

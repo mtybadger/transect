@@ -8,7 +8,7 @@ from inspect_scout import Result, Scanner, Transcript, scanner
 from pydantic import JsonValue
 
 from transect.scanners.compaction import compaction_texts
-from transect.scanners.helpers import Lanes, all_model_turns, is_model_turn
+from transect.scanners.helpers import Lanes, all_model_turns, is_model_turn, top_lanes
 
 # inspect-ai ModelUsage attribute names, used verbatim as dataframe columns
 _USAGE_FIELDS = (
@@ -26,7 +26,19 @@ def token_timeline() -> Scanner[Transcript]:
     """Per-model-turn token usage on the orchestrator turn axis, plus the
     sub-agent span record.
 
-    value = {"timeline": [...], "spans": [...], "lane_activity": [...]}.
+    value = {"timeline": [...], "spans": [...], "lane_activity": [...],
+    "lanes": [...]}.
+
+    Every entry carries ``lane`` / ``lane_kind``: the top-level lane it
+    belongs to (`helpers.top_lanes`). A conventional transcript has one
+    lane, its orchestrator; a multi-agent episode has one per participant
+    plus the ``world`` lane. ``turn`` is the ordinal within the entry's
+    own lane.
+
+    ``lanes``: one entry per top-level lane: ``lane`` / ``lane_kind`` /
+    ``lane_id``, ``begin_at`` / ``end_at`` (the span's recorded begin and
+    end), ``n_turns`` (its own model turns) and ``metadata`` (the
+    span-begin metadata as recorded).
 
     ``timeline``: one entry per model turn in any lane, in event order:
     ``turn`` (the orchestrator ordinal; None on a sub-agent turn and on
@@ -53,44 +65,73 @@ def token_timeline() -> Scanner[Transcript]:
     """
 
     async def execute(transcript: Transcript) -> Result:
-        lanes = Lanes(transcript)
         timeline: list[dict[str, Any]] = []
-        lane_counts: dict[str, int] = {}
-        for event, calls in all_model_turns(transcript):
-            sub = lanes.sub_agent_of(event)
-            is_main = lanes.is_main(event)
-            # an off-axis call (init/scorer/utility: neither orchestrator
-            # nor sub-agent) belongs to no lane and counts in none
-            lane_key = sub.id if sub else "__main__" if is_main else None
-            lane_turn = None
-            if lane_key is not None:
-                lane_turn = lane_counts.get(lane_key, 0)
-                lane_counts[lane_key] = lane_turn + 1
-            usage = event.output.usage
-            entry: dict[str, Any] = {
-                "turn": lane_turn if is_main else None,
-                "lane_turn": lane_turn,
-                "agent_lane": sub.name if sub else None,
-                "agent_span_id": sub.id if sub else None,
-                "n_tool_calls": len(calls),
-                "timestamp": _iso(getattr(event, "timestamp", None)),
-                "completed": _iso(getattr(event, "completed", None)),
-            }
-            for field in _USAGE_FIELDS:
-                entry[field] = getattr(usage, field, None) if usage else None
-            timeline.append(entry)
+        spans: list[dict[str, Any]] = []
+        lane_activity: list[dict[str, Any]] = []
+        lanes_record: list[dict[str, Any]] = []
         # only Inspect records span ends; an OpenClaw import synthesises
         # them at last activity
         ends_recorded = transcript.source_type == "eval_log"
-        turns = lane_counts.get("__main__", 0)
+        total_turns = 0
+        for index, top in enumerate(top_lanes(transcript)):
+            lanes = Lanes(transcript, top)
+            stamp = {"lane": lanes.name, "lane_kind": lanes.kind}
+            lane_counts: dict[str, int] = {}
+            for event, calls in all_model_turns(transcript):
+                if not lanes.owns(event):
+                    continue
+                sub = lanes.sub_agent_of(event)
+                is_main = lanes.is_main(event)
+                # an off-axis call (init/scorer/utility: neither this lane
+                # nor one of its sub-agents) belongs to no lane and counts
+                # in none; it is recorded once, with the first lane
+                lane_key = sub.id if sub else "__main__" if is_main else None
+                if lane_key is None and index > 0:
+                    continue
+                lane_turn = None
+                if lane_key is not None:
+                    lane_turn = lane_counts.get(lane_key, 0)
+                    lane_counts[lane_key] = lane_turn + 1
+                usage = event.output.usage
+                entry: dict[str, Any] = {
+                    **stamp,
+                    "turn": lane_turn if is_main else None,
+                    "lane_turn": lane_turn,
+                    "agent_lane": sub.name if sub else None,
+                    "agent_span_id": sub.id if sub else None,
+                    "n_tool_calls": len(calls),
+                    "timestamp": _iso(getattr(event, "timestamp", None)),
+                    "completed": _iso(getattr(event, "completed", None)),
+                }
+                for field in _USAGE_FIELDS:
+                    entry[field] = getattr(usage, field, None) if usage else None
+                timeline.append(entry)
+            spans.extend(
+                {**record, **stamp} for record in _span_records(lanes, ends_recorded)
+            )
+            lane_activity.extend({**row, **stamp} for row in _lane_activity(lanes))
+            turns = lane_counts.get("__main__", 0)
+            total_turns += turns
+            lanes_record.append(
+                {
+                    **stamp,
+                    "lane_id": lanes.lane_id,
+                    "begin_at": _iso(lanes.begin_at),
+                    "end_at": _iso(lanes.end_at),
+                    "n_turns": turns,
+                    "metadata": lanes.metadata or None,
+                }
+            )
         return Result(
             value={
                 "timeline": cast(JsonValue, timeline),
-                "spans": cast(JsonValue, _span_records(lanes, ends_recorded)),
-                "lane_activity": cast(JsonValue, _lane_activity(lanes)),
+                "spans": cast(JsonValue, spans),
+                "lane_activity": cast(JsonValue, lane_activity),
+                "lanes": cast(JsonValue, lanes_record),
             },
             explanation=(
-                f"{turns} orchestrator turns, {len(timeline) - turns} other turns"
+                f"{len(lanes_record)} lane(s), {total_turns} lane turns, "
+                f"{len(timeline) - total_turns} other turns"
             ),
         )
 
@@ -182,33 +223,36 @@ def context_flush() -> Scanner[Transcript]:
     async def execute(transcript: Transcript) -> Result:
         flushes: list[dict[str, Any]] = []
         texts = iter(compaction_texts(transcript))
-        lanes = Lanes(transcript)
-        lane_counts: dict[str, int] = {}
-        for turn, event in lanes.events_before_turn():
-            if is_model_turn(event):
-                sub = lanes.sub_agent_of(event)
-                if sub is not None:
-                    lane_counts[sub.id] = lane_counts.get(sub.id, 0) + 1
-                continue
-            if event.event != "compaction":
-                continue
-            lane = lanes.sub_agent_of(event)
-            flushes.append(
-                {
-                    "turn": turn,
-                    "agent_span_id": lane.id if lane is not None else None,
-                    "lane_turn": lane_counts.get(lane.id, 0) if lane else turn,
-                    "type": event.type,
-                    "source": event.source,
-                    "tokens_before": event.tokens_before,
-                    "tokens_after": event.tokens_after,
-                    "role": event.role,
-                    "metadata": event.model_dump(mode="json")["metadata"],
-                    "compaction_prompt": None,
-                    "compaction_nudge": None,
-                    **next(texts, {}),
-                }
-            )
+        for top in top_lanes(transcript):
+            lanes = Lanes(transcript, top)
+            stamp = {"lane": lanes.name, "lane_kind": lanes.kind}
+            lane_counts: dict[str, int] = {}
+            for turn, event in lanes.events_before_turn():
+                if is_model_turn(event):
+                    sub = lanes.sub_agent_of(event)
+                    if sub is not None:
+                        lane_counts[sub.id] = lane_counts.get(sub.id, 0) + 1
+                    continue
+                if event.event != "compaction":
+                    continue
+                lane = lanes.sub_agent_of(event)
+                flushes.append(
+                    {
+                        **stamp,
+                        "turn": turn,
+                        "agent_span_id": lane.id if lane is not None else None,
+                        "lane_turn": lane_counts.get(lane.id, 0) if lane else turn,
+                        "type": event.type,
+                        "source": event.source,
+                        "tokens_before": event.tokens_before,
+                        "tokens_after": event.tokens_after,
+                        "role": event.role,
+                        "metadata": event.model_dump(mode="json")["metadata"],
+                        "compaction_prompt": None,
+                        "compaction_nudge": None,
+                        **next(texts, {}),
+                    }
+                )
         return Result(
             value={"flushes": cast(JsonValue, flushes)},
             explanation=f"{len(flushes)} compaction(s)",
@@ -263,9 +307,12 @@ def human_intervention() -> Scanner[Transcript]:
     async def execute(transcript: Transcript) -> Result:
         interventions: list[dict[str, Any]] = []
 
+        stamp: dict[str, Any] = {}
+
         def entry(turn, channel, initiator, content, prompt=None, outcome=None):
             interventions.append(
                 {
+                    **stamp,
                     "turn": turn,
                     "channel": channel,
                     "initiator": initiator,
@@ -275,113 +322,177 @@ def human_intervention() -> Scanner[Transcript]:
                 }
             )
 
-        # Human messages live in the history, not the event stream. The log
-        # records which orchestrator call first saw each message: the first
-        # orchestrator model event whose input carries its id (or merged it
-        # into a combined message) is the turn it precedes. A message no
-        # input records (one planted into the history, a history without
-        # its event stream) falls back to the history's footprints of
-        # orchestrator turns.
-        lanes = Lanes(transcript)
-        first_seen: dict[str, int] = {}
-        turn_of_output: dict[str, int] = {}
-        # every non-orchestrator output (sub-agent, init, scorer): an Inspect
-        # handoff appends a sub-agent's to the parent thread, where they
-        # must not advance the orchestrator axis
-        sub_outputs = {
-            event.output.message.id
-            for _, event in lanes.events_before_turn()
-            if is_model_turn(event) and event.output.message.id
-        }
-        for turn, event, _calls in lanes.turns():
-            output_id = event.output.message.id
-            for seen in event.input:
-                combined = (getattr(seen, "metadata", None) or {}).get("combined_from")
-                for seen_id in (seen.id, *(combined or [])):
-                    if seen_id is not None:
-                        first_seen.setdefault(seen_id, turn)
-            if output_id is not None:
-                # first occurrence wins: a cached generate replays an output
-                turn_of_output.setdefault(output_id, turn)
-        # summary flushes by the turn they precede (as context_flush records
-        # them): the fallback footprint for a summary message no input saw
-        summary_flushes = [
-            turn
-            for turn, event in lanes.events_before_turn()
-            if event.event == "compaction" and event.type == "summary"
-        ]
-        next_turn = 0
-        seen_task_prompt = False
-        for message in transcript.messages:
-            if message.role == "assistant":
-                if message.id in sub_outputs:
-                    continue
-                # an orchestrator assistant message no event recorded still
-                # advances the axis by one; a repeated id never moves it back
-                recorded = turn_of_output.get(message.id or "")
-                next_turn = max(next_turn + 1, 0 if recorded is None else recorded + 1)
-                continue
-            if message.role != "user":
-                continue
-            seen = first_seen.get(message.id or "")
-            if (getattr(message, "metadata", None) or {}).get("summary"):
-                # a compaction summary stands for the summarizer turn before
-                # it; unseen, it takes the first summary flush ahead of the
-                # axis (a flush at or behind it belongs to an earlier window,
-                # and trim, edit and native flushes never qualify by type)
-                if seen is not None:
-                    next_turn = max(next_turn, seen)
-                else:
-                    ahead = next((t for t in summary_flushes if t > next_turn), None)
-                    if ahead is not None:
-                        next_turn = ahead
-                continue
-            source = getattr(message, "source", None)
-            if source not in ("operator", "input"):
-                continue
-            if not seen_task_prompt:
-                seen_task_prompt = True
-                continue
-            if seen is not None:
-                next_turn = max(next_turn, seen)
-            entry(
-                seen if seen is not None else next_turn,
-                source,
-                "human",
-                (message.text or "").strip(),
-            )
+        for index, top in enumerate(top_lanes(transcript)):
+            lanes = Lanes(transcript, top)
+            stamp = {"lane": lanes.name, "lane_kind": lanes.kind}
+            if index == 0:
+                # the history is one thread: read it against the first lane
+                # Human messages live in the history, not the event stream. The log
+                # records which orchestrator call first saw each message: the first
+                # orchestrator model event whose input carries its id (or merged it
+                # into a combined message) is the turn it precedes. A message no
+                # input records (one planted into the history, a history without
+                # its event stream) falls back to the history's footprints of
+                # orchestrator turns.
+                first_seen: dict[str, int] = {}
+                turn_of_output: dict[str, int] = {}
+                # every non-orchestrator output (sub-agent, init, scorer): an Inspect
+                # handoff appends a sub-agent's to the parent thread, where they
+                # must not advance the orchestrator axis
+                sub_outputs = {
+                    event.output.message.id
+                    for _, event in lanes.events_before_turn()
+                    if is_model_turn(event) and event.output.message.id
+                }
+                for turn, event, _calls in lanes.turns():
+                    output_id = event.output.message.id
+                    for seen in event.input:
+                        combined = (getattr(seen, "metadata", None) or {}).get(
+                            "combined_from"
+                        )
+                        for seen_id in (seen.id, *(combined or [])):
+                            if seen_id is not None:
+                                first_seen.setdefault(seen_id, turn)
+                    if output_id is not None:
+                        # first occurrence wins: a cached generate replays an output
+                        turn_of_output.setdefault(output_id, turn)
+                # summary flushes by the turn they precede (as context_flush records
+                # them): the fallback footprint for a summary message no input saw
+                summary_flushes = [
+                    turn
+                    for turn, event in lanes.events_before_turn()
+                    if event.event == "compaction" and event.type == "summary"
+                ]
+                next_turn = 0
+                seen_task_prompt = False
+                for message in transcript.messages:
+                    if message.role == "assistant":
+                        if message.id in sub_outputs:
+                            continue
+                        # an orchestrator assistant message no event recorded still
+                        # advances the axis by one; a repeated id never moves it back
+                        recorded = turn_of_output.get(message.id or "")
+                        next_turn = max(
+                            next_turn + 1, 0 if recorded is None else recorded + 1
+                        )
+                        continue
+                    if message.role != "user":
+                        continue
+                    seen = first_seen.get(message.id or "")
+                    if (getattr(message, "metadata", None) or {}).get("summary"):
+                        # a compaction summary stands for the summarizer turn before
+                        # it; unseen, it takes the first summary flush ahead of the
+                        # axis (a flush at or behind it belongs to an earlier window,
+                        # and trim, edit and native flushes never qualify by type)
+                        if seen is not None:
+                            next_turn = max(next_turn, seen)
+                        else:
+                            ahead = next(
+                                (t for t in summary_flushes if t > next_turn), None
+                            )
+                            if ahead is not None:
+                                next_turn = ahead
+                        continue
+                    source = getattr(message, "source", None)
+                    if source not in ("operator", "input"):
+                        continue
+                    if not seen_task_prompt:
+                        seen_task_prompt = True
+                        continue
+                    if seen is not None:
+                        next_turn = max(next_turn, seen)
+                    entry(
+                        seen if seen is not None else next_turn,
+                        source,
+                        "human",
+                        (message.text or "").strip(),
+                    )
 
-        for turn, event in lanes.events_before_turn():
-            if event.event == "input":
-                prompt = (getattr(event, "message", None) or "").strip() or None
-                entry(
-                    turn,
-                    "input_event",
-                    "agent",
-                    _input_answer(event, prompt),
-                    prompt,
-                    getattr(event, "outcome", None),
-                )
-            elif event.event == "approval" and event.approver == "human":
-                call = event.call
-                arguments = (
-                    json.dumps(call.arguments, ensure_ascii=False, default=str)
-                    if call.arguments
-                    else ""
-                )
-                entry(
-                    turn,
-                    "approval",
-                    "agent",
-                    (event.explanation or "").strip(),
-                    f"{call.function}({arguments})",
-                    event.decision,
-                )
+            for turn, event in lanes.events_before_turn():
+                if event.event == "input":
+                    prompt = (getattr(event, "message", None) or "").strip() or None
+                    entry(
+                        turn,
+                        "input_event",
+                        "agent",
+                        _input_answer(event, prompt),
+                        prompt,
+                        getattr(event, "outcome", None),
+                    )
+                elif event.event == "approval" and event.approver == "human":
+                    call = event.call
+                    arguments = (
+                        json.dumps(call.arguments, ensure_ascii=False, default=str)
+                        if call.arguments
+                        else ""
+                    )
+                    entry(
+                        turn,
+                        "approval",
+                        "agent",
+                        (event.explanation or "").strip(),
+                        f"{call.function}({arguments})",
+                        event.decision,
+                    )
 
         interventions.sort(key=lambda i: i["turn"])
         return Result(
             value={"interventions": cast(JsonValue, interventions)},
             explanation=f"{len(interventions)} intervention(s)",
+        )
+
+    return execute
+
+
+@scanner(events=["info", "model", "span_begin", "span_end"], timeline=True)
+def lane_events() -> Scanner[Transcript]:
+    """The recorded non-model events of every lane: an episode's shared
+    record and what reached each agent.
+
+    value = {"events": [entry, ...]}, one entry per ``info`` event in any
+    lane, in event order: ``lane`` / ``lane_kind``, ``turn`` (the lane's
+    own model turn the event precedes; 0 throughout a lane with no
+    turns), ``timestamp``, ``source`` (the event's recorded source:
+    delivery / message / world / episode on a multisect import),
+    ``kind`` (``data["kind"]`` when the payload names one),
+    ``message_id`` / ``channel`` / ``sender`` (message facts when
+    present; sender falls back to ``actor``), ``text`` (capped at 400
+    characters), ``data`` (the complete payload) and ``event_id``.
+    A conventional transcript records none and the value is empty.
+    """
+
+    async def execute(transcript: Transcript) -> Result:
+        rows: list[dict[str, Any]] = []
+        for top in top_lanes(transcript):
+            lanes = Lanes(transcript, top)
+            for turn, event in lanes.events_before_turn():
+                if event.event != "info":
+                    continue
+                data = (
+                    event.data
+                    if isinstance(event.data, dict)
+                    else {"value": event.data}
+                )
+                text = data.get("text")
+                rows.append(
+                    {
+                        "lane": lanes.name,
+                        "lane_kind": lanes.kind,
+                        "turn": turn,
+                        "timestamp": _iso(getattr(event, "timestamp", None)),
+                        "source": getattr(event, "source", None),
+                        "kind": data.get("kind"),
+                        "message_id": data.get("message_id"),
+                        "channel": data.get("channel"),
+                        "sender": data.get("sender") or data.get("actor"),
+                        "text": str(text)[:400] if text else None,
+                        "data": data,
+                        "event_id": getattr(event, "uuid", None),
+                    }
+                )
+        return Result(
+            value={"events": cast(JsonValue, rows)},
+            explanation=f"{len(rows)} lane event(s)",
         )
 
     return execute

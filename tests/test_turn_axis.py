@@ -123,7 +123,7 @@ def test_a_span_less_transcript_is_its_own_orchestrator(events, turns):
                 *agent_span("A", "one", inner=[model_turn("a")]),
                 *agent_span("B", "two", inner=[model_turn("b")]),
             ],
-            r"2 top-level agents.*'one'.*'two'",
+            r"2 top-level lanes.*'one'.*'two'",
         ),
         ([*agent_span("A", "one", inner=[])], r"no model turns"),
     ],

@@ -39,6 +39,8 @@ def test_triage_runs_the_default_path_end_to_end(demo_log, tmp_path, capsys):
         "subagents",
         "subagent_votes",
         "label_definitions",
+        "lanes",
+        "lane_events",
     }
 
 

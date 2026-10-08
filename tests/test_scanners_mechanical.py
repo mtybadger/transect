@@ -192,6 +192,8 @@ def test_context_flush_records_compaction_events_at_their_turn():
     value = run_scan(context_flush(), events).value
     (flush,) = value["flushes"]
     assert flush == {
+        "lane": "main",
+        "lane_kind": "agent",
         "turn": 2,
         "agent_span_id": None,
         "lane_turn": 2,

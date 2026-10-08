@@ -25,7 +25,7 @@ re-derivation; there is no external doc to hunt for.
 report plus tidy pandas frames (see README.md for the full pitch). Two
 kinds of extraction, deliberately separated: **structural** ($0, no API
 key - token timeline, context flushes, human interventions, sub-agent
-activity, transcript info, eval setup) and **judged** (LLM - decision
+activity, lanes and lane events, transcript info, eval setup) and **judged** (LLM - decision
 phases and sub-agent classification, run solo, k-roll, or cohort,
 with an optional second-round verifier). Code and docs both say
 "structural" - grep for `structural`.
@@ -108,18 +108,26 @@ scanner change take effect; run a new scan and retain both results for compariso
   setup only; never resolve them using the installed model database or
   infer a threshold from `tokens_before`. Unrecorded thresholds render
   no row, line, or toggle.
-- **Orchestrator turn axis.** `turn` is the 0-based ordinal of the
-  orchestrator's (main lane's) model turns, from
-  `scanners.helpers.orchestrator_turns`, in every scanner value, frame,
-  judge digest and chart. Sub-agent turns are off the axis: they carry
-  `agent_span_id` and `lane_turn`, never a turn number. The subagents
-  frame records the orchestrator turns active at each span's start and
-  end by wall-clock (`frames/spine.py`), and the swimlane chart maps the
-  same timestamps to fractional positions when it draws; frames hold
-  timestamps and integer turns only. A custom scanner numbers turns with
-  the same helper. The main lane
-  is the span Scout would scan at depth 1; a transcript with model turns
-  but no single orchestrator agent raises rather than guessing.
+- **Lane turn axis.** A transcript has one or more top-level lanes
+  (`scanners.helpers.top_lanes`): the orchestrator of a conventional
+  run, or each participant plus the shared `world` lane of a
+  multi-agent episode (sibling `agent` spans; a lane with no model
+  turns is declared by `{"lane": "world"}` in its span-begin metadata).
+  `turn` is the 0-based ordinal of a lane's own model turns, and every
+  per-turn scanner value and frame stamps `lane` / `lane_kind` beside
+  it. Sub-agent turns are off the axis: they carry `agent_span_id` and
+  `lane_turn`, never a turn number, and a sub-agent belongs to the lane
+  it nests under, never to a sibling lane. The subagents frame records
+  the lane turns active at each span's start and end by wall-clock
+  (`frames/spine.py`), and the swimlane chart maps the same timestamps
+  to fractional positions when it draws; frames hold timestamps and
+  integer turns only. Across lanes the only shared axis is wall clock:
+  the episode overview (`report/episode.py`) draws every lane on it, and
+  per-lane sections keep their own turn axis. `main_span` is the
+  single-lane read and raises on several lanes; a scanner that supports
+  episodes iterates `top_lanes` and builds `Lanes(transcript, lane)`.
+  A transcript with model turns under no agent span raises rather than
+  guessing.
 - **Review units.** Phase `verifier_reviews` retains the original
   selected review units through display merging;
   `transect.reliability.review_units` is the review-population read.

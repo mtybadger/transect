@@ -224,6 +224,25 @@ viewer.
 calls); `render(results)` re-renders the report. Use `results.scan_location`
 to reload that exact scan rather than whichever scan is latest in its parent.
 
+## Multi-agent episodes
+
+Transect numbers turns per *lane*. A conventional transcript has one
+lane, its orchestrator, and reads exactly as before. A multi-agent
+episode - several peer agents recorded as sibling top-level `agent`
+spans in one Inspect sample, plus a `world` lane (an agent span with
+`{"lane": "world"}` in its span-begin metadata) holding the shared
+record: channel messages, deliveries, world actions - gets one lane per
+participant. Every per-turn frame stamps `lane` / `lane_kind`, the
+`lanes` frame lists the lanes, and `lane_events` holds each lane's
+recorded `info` events (a delivery in an agent lane means the message
+verifiably entered that agent's context before the stated turn).
+
+The report renders an **Episode timeline** once per episode - every
+lane on one wall-clock axis, with model turns, deliveries, messages by
+channel and world actions - followed by the usual per-lane sections.
+Inspect's log format already records concurrent agents this way;
+`multisect` (a sibling package) converts Krill runs into such logs.
+
 ## Reading the report
 
 ![The Transect report on a CRUX AI R&D run: 71-phase timeline with the per-turn agreement strip (hovered: member votes, agreement with its denominator, and label provenance), human interventions, and token telemetry](docs/images/transect_report.png)
@@ -277,10 +296,13 @@ frames["phase_turn_votes"]  # per-judge per-turn votes
 frames["subagents"]  # one row per sub-agent span, classification when judged
 frames["subagent_votes"]  # per-judge votes behind each label
 frames["label_definitions"]  # the label rubric the judges classified against
+frames["lanes"]  # one row per top-level lane (an episode's participants + world)
+frames["lane_events"]  # deliveries, channel messages, world actions per lane
 ```
 
 Every frame carries the identity prefix (`sample_id`, `task_set`,
-`epoch`, `transcript_id`, `agent`) and `schema_version`; per-column
+`epoch`, `transcript_id`, `agent`) and `schema_version`; per-turn
+frames also carry `lane` / `lane_kind` (see "Multi-agent episodes"); per-column
 semantics live in the corresponding `transect/frames/*.py` docstring.
 They are plain pandas: filter, join, and plot as usual. Frames can contain task
 prompts, system/scaffold instructions, human interventions, delegation text and
@@ -299,6 +321,9 @@ erDiagram
     transcript_info ||--o{ token_timeline : "transcript_id"
     transcript_info ||--o{ phases : "transcript_id"
     transcript_info ||--o{ subagents : "transcript_id"
+    transcript_info ||--o{ lanes : "transcript_id"
+    lanes ||--o{ token_timeline : "lane"
+    lanes ||--o{ lane_events : "lane"
     token_timeline ||--o| phase_turns : "turn"
     token_timeline ||--o{ flushes : "turn"
     token_timeline ||--o{ interventions : "turn"
@@ -440,6 +465,22 @@ erDiagram
         string label PK
         string description
         bool ops
+    }
+    lanes["lanes (one row per top-level lane)"] {
+        string lane PK "the lane's span name"
+        string lane_kind "agent / world"
+        string begin_at
+        string end_at
+        int n_turns "the lane's own model turns"
+    }
+    lane_events["lane_events (one row per recorded lane event)"] {
+        string lane FK
+        int turn "the lane turn the event precedes"
+        string source "delivery / message / world / episode"
+        string kind
+        string channel
+        string sender
+        string text
     }
 ```
 

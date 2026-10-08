@@ -36,6 +36,11 @@ CHANNEL_COLORS = {
     "operator": "#f28e2b",
 }
 _TEXT_CHARS = 160
+GAP_MIN_S = 60.0
+"""An idle stretch at least this long, with no activity in any lane, is
+collapsed on the episode axis."""
+GAP_WIDTH_S = 20.0
+"""The width a collapsed stretch keeps on the axis, in axis seconds."""
 
 
 def episode_overview_section(
@@ -53,14 +58,36 @@ def episode_overview_section(
     span_s = max((t1 - t0).total_seconds(), 1.0)
     turns = _turn_rows(timeline, phase_turns, phase_colors or {}, row_of, t0)
     points = _point_rows(events, row_of, t0)
+    axis = compress_axis(
+        [*turns.x1, *turns.x2, *points.x], span_s, GAP_MIN_S, GAP_WIDTH_S
+    )
+    if axis.gaps:
+        turns = turns.assign(x1=turns.x1.map(axis.map), x2=turns.x2.map(axis.map))
+        points = points.assign(x=points.x.map(axis.map))
     component, height = charts.episode_lanes(
         turns,
         points,
         labels,
-        span_s,
-        x_label=f"seconds since episode start ({t0.strftime('%Y-%m-%d %H:%M:%S %Z')})",
+        axis.span,
+        x_label=(
+            f"time since episode start ({t0.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+            + (
+                f"; idle stretches over {int(GAP_MIN_S)} s collapsed"
+                if axis.gaps
+                else ", seconds"
+            )
+        ),
+        axis_labels=axis.labels_frame() if axis.gaps else None,
+        gaps=axis.gaps_frame() if axis.gaps else None,
     )
     judged = phase_turns is not None and len(phase_turns) > 0
+    compression_note = (
+        f" Idle stretches with no activity in any lane for over {int(GAP_MIN_S)} "
+        "seconds are collapsed to a dashed gap captioned with their length; "
+        "the labels along the bottom give the time at each resumption."
+        if axis.gaps
+        else " Time is recorded wall clock with no gap compression."
+    )
     intro = Markup(
         "<p>Every top-level lane of this transcript on one wall-clock axis: "
         "the world lane's channel messages (ticks, coloured by channel) and "
@@ -68,8 +95,7 @@ def episode_overview_section(
         "start to completion"
         + (", coloured by judged phase" if judged else "")
         + ") with the deliveries that verifiably entered its context "
-        "(triangles). Time is recorded wall clock with no gap compression. "
-        "Hover any element for its detail.</p>"
+        "(triangles)." + compression_note + " Hover any element for its detail.</p>"
     )
     blocks: list[Markup | None] = [
         intro,
@@ -84,6 +110,89 @@ def episode_overview_section(
         blocks.append(sections.label_chips(counts, phase_colors))
     blocks.append(_lane_table(lanes, timeline, events))
     return sections.section("Episode timeline", blocks)
+
+
+class CompressedAxis:
+    """A piecewise-linear map from episode seconds to axis seconds that
+    collapses idle stretches.
+
+    ``segments`` are the kept ``(start, end)`` stretches of episode time,
+    in order; each is drawn at true length, and every gap between two
+    segments is drawn `GAP_WIDTH_S` wide. ``gaps`` are ``(axis_x,
+    seconds_collapsed)`` for the captions.
+    """
+
+    def __init__(self, segments: list[tuple[float, float]], gap_width: float) -> None:
+        self.segments = segments
+        self.gap_width = gap_width
+        self.offsets: list[float] = []
+        self.gaps: list[tuple[float, float]] = []
+        position = 0.0
+        previous_end: float | None = None
+        for start, end in segments:
+            if previous_end is not None:
+                self.gaps.append((position + gap_width / 2, start - previous_end))
+                position += gap_width
+            self.offsets.append(position - start)
+            position += end - start
+            previous_end = end
+        self.span = max(position, 1.0)
+
+    def map(self, x: float) -> float:
+        for (start, end), offset in zip(self.segments, self.offsets, strict=True):
+            if x <= end:
+                return max(x, start) + offset
+        start, end = self.segments[-1]
+        return end + self.offsets[-1]
+
+    def labels_frame(self) -> pd.DataFrame:
+        rows = [
+            {"x": start + offset, "label": _offset_label(start)}
+            for (start, _end), offset in zip(self.segments, self.offsets, strict=True)
+        ]
+        return pd.DataFrame(rows, columns=["x", "label"])
+
+    def gaps_frame(self) -> pd.DataFrame:
+        rows = [
+            {"x": x, "label": f"{_offset_label(seconds)} idle"}
+            for x, seconds in self.gaps
+        ]
+        return pd.DataFrame(rows, columns=["x", "label"])
+
+
+def compress_axis(
+    times: list[float], span_s: float, gap_min: float, gap_width: float
+) -> CompressedAxis:
+    """Collapse every stretch of at least ``gap_min`` seconds in which no
+    lane has any activity. ``times`` are every activity instant (turn
+    starts and ends, point events) in episode seconds. With no such
+    stretch the axis is the identity over ``[0, span_s]``."""
+    stamps = sorted({float(t) for t in times if t is not None and t == t})
+    if not stamps:
+        return CompressedAxis([(0.0, max(span_s, 1.0))], gap_width)
+    segments: list[tuple[float, float]] = []
+    start = 0.0
+    previous = 0.0
+    for t in stamps:
+        if t - previous >= gap_min:
+            segments.append((start, previous))
+            start = t
+        previous = t
+    end = max(span_s, previous)
+    if end - previous >= gap_min:
+        segments.append((start, previous))
+        segments.append((end, end))
+    else:
+        segments.append((start, end))
+    segments = [(a, b) for a, b in segments if b >= a]
+    return CompressedAxis(segments, gap_width)
+
+
+def _offset_label(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 def _lane_rows(lanes: pd.DataFrame) -> list[tuple[str, str]]:

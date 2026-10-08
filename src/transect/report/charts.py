@@ -2076,6 +2076,8 @@ def episode_lanes(
     lanes: list[str],
     span_s: float,
     x_label: str,
+    axis_labels: pd.DataFrame | None = None,
+    gaps: pd.DataFrame | None = None,
 ) -> tuple[Component, int]:
     """Every lane of an episode on one wall-clock axis.
 
@@ -2095,6 +2097,12 @@ def episode_lanes(
     "one mark draws, another answers" idiom of `swimlanes`), so the
     visible marks carry no tip and the plot has one channel-key set.
     `color_scale="identity"`: every colour is a per-row hex column.
+
+    With ``axis_labels`` (``x``, ``label``) the x axis is drawn by hand:
+    the caller has compressed idle stretches out of the axis, so the
+    scale's own ticks would mislabel it; ``gaps`` (``x``, ``label``) mark
+    where a stretch was collapsed, as dashed rules captioned with the
+    collapsed duration.
     """
     n_rows = max(len(lanes), 1)
     plot_w = _EPISODE_WIDTH - _EPISODE_MARGIN_LEFT - 24
@@ -2218,7 +2226,45 @@ def episode_lanes(
             dx=-8,
         )
     )
-    height_px = 40 + _EPISODE_ROW_PX * n_rows
+    compressed = axis_labels is not None and len(axis_labels) > 0
+    if gaps is not None and len(gaps):
+        gap_frame = gaps.copy()
+        gap_frame["y"] = -0.5
+        marks.append(
+            _offset_rule_x(
+                Data.from_dataframe(gap_frame[["x"]]),
+                "#999",
+                "3,3",
+                pointer_events="none",
+            )
+        )
+        marks.append(
+            text(
+                Data.from_dataframe(gap_frame[["x", "y", "label"]]),
+                x="x",
+                y="y",
+                text="label",
+                styles=TextStyles(text_anchor="middle", font_size=10),
+                fill=_MARGIN_LABEL_FILL,
+                dy=-4,
+            )
+        )
+    if compressed:
+        assert axis_labels is not None
+        tick_frame = axis_labels.copy()
+        tick_frame["y"] = n_rows - 0.5
+        marks.append(
+            text(
+                Data.from_dataframe(tick_frame[["x", "y", "label"]]),
+                x="x",
+                y="y",
+                text="label",
+                styles=TextStyles(text_anchor="start", font_size=10),
+                fill=_MARGIN_LABEL_FILL,
+                dy=12,
+            )
+        )
+    height_px = 44 + _EPISODE_ROW_PX * n_rows
     component = plot(
         *marks,
         width=_EPISODE_WIDTH,
@@ -2227,7 +2273,10 @@ def episode_lanes(
         y_domain=(n_rows - 0.5, -0.5),
         x_domain=(0.0, max(span_s, 1.0)),
         x_label=x_label,
+        x_axis=False if compressed else "bottom",
         margin_left=_EPISODE_MARGIN_LEFT,
+        margin_top=22,
+        margin_bottom=34,
         color_scale=_IDENTITY_SCALE,  # per-row hex columns
     )
     return component, _section_height(height_px, len(_EPISODE_TIP_FIELDS))

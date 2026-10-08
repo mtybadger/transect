@@ -68,6 +68,8 @@ class Layer:
             episode overview ahead of the lanes, the frame cut to the
             transcript. On a conventional transcript ``"lane"`` and
             ``"episode"`` both render once.
+        title: The section heading; ``None`` shows the layer name. The
+            name stays the mount key and the section_order key either way.
     """
 
     name: str
@@ -78,6 +80,7 @@ class Layer:
     audit: tuple[str, str] | None = None
     scanner_args: dict[str, Any] = field(default_factory=dict)
     scope: str = "transcript"
+    title: str | None = None
 
 
 def validate_layers(layers: list[Layer], builtin_frames: tuple[str, ...] = ()) -> None:

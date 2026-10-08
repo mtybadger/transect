@@ -113,7 +113,8 @@ def layer_section(
         pending_height += height
     flush_pending()
     heading = Markup(
-        f'<h3>{escape(layer.name)} <span class="custom-layer-badge">custom</span></h3>'
+        f"<h3>{escape(getattr(layer, 'title', None) or layer.name)} "
+        '<span class="custom-layer-badge">custom</span></h3>'
     )
     meta = sections.layer_meta_line(frame) or Markup("")
     body = Markup("").join(fragments)

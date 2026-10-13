@@ -53,6 +53,13 @@ h3 {{ font-size: var(--transect-font-size-small); font-weight: 600; }}
    the audit's heading hierarchy reads top-down */
 h4 {{ font-size: var(--transect-font-size-smaller); font-weight: 600; }}
 .phase-cards {{ overflow-wrap: anywhere; }}
+/* static layer tables */
+.relmap th.sortable {{ cursor: pointer; user-select: none; white-space: nowrap; }}
+.relmap th.sortable[data-sort="asc"]::after {{ content: " \\25B4"; }}
+.relmap th.sortable[data-sort="desc"]::after {{ content: " \\25BE"; }}
+.relmap td.text {{ white-space: normal; min-width: 22rem; max-width: 40rem;
+  text-align: left; font-size: 0.75rem; }}
+.relmap td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
 .meta {{ color: var(--transect-color-muted); font-size: 0.85rem; }}
 /* chart how-to-read lines: one step below .meta, so explainers cede
    visual space to the charts they explain */

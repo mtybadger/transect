@@ -37,6 +37,29 @@
     screen. -#}
 <button id="transect-back-top" onclick="window.scrollTo({top: 0, behavior: 'smooth'})" title="Back to the top of the page">&uarr; Back to top</button>
 <script>
+// Static layer tables (.relmap.sortable): click a header to sort by
+// that column, numeric when every cell parses, click again to reverse.
+function _transectSortTable(th) {
+  var table = th.closest("table");
+  var idx = Array.prototype.indexOf.call(th.parentNode.children, th);
+  var tbody = table.tBodies[0];
+  var rows = Array.prototype.slice.call(tbody.rows);
+  var asc = th.getAttribute("data-sort") !== "asc";
+  var values = rows.map(function(r) { return r.cells[idx] ? r.cells[idx].textContent.trim() : ""; });
+  var numeric = values.every(function(v) { return v === "" || !isNaN(parseFloat(v.replace(/,/g, ""))); });
+  rows.sort(function(a, b) {
+    var va = a.cells[idx] ? a.cells[idx].textContent.trim() : "";
+    var vb = b.cells[idx] ? b.cells[idx].textContent.trim() : "";
+    var cmp = numeric
+      ? (parseFloat(va.replace(/,/g, "")) || 0) - (parseFloat(vb.replace(/,/g, "")) || 0)
+      : va.localeCompare(vb);
+    return asc ? cmp : -cmp;
+  });
+  rows.forEach(function(r) { tbody.appendChild(r); });
+  Array.prototype.forEach.call(th.parentNode.children, function(h) { h.removeAttribute("data-sort"); });
+  th.setAttribute("data-sort", asc ? "asc" : "desc");
+}
+
 // Band chunks link to their phase card (href target="_parent", ids
 // transcript-scoped "#phase-<idx>-<n>"). Fragment navigation scrolls;
 // this additionally opens the target <details> (native auto-open is

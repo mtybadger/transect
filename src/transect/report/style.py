@@ -53,6 +53,28 @@ h3 {{ font-size: var(--transect-font-size-small); font-weight: 600; }}
    the audit's heading hierarchy reads top-down */
 h4 {{ font-size: var(--transect-font-size-smaller); font-weight: 600; }}
 .phase-cards {{ overflow-wrap: anywhere; }}
+details.event, .section {{ scroll-margin-top: 3rem; }}
+/* report units: a multi-transcript report collapses behind the unit navigation */
+details.transcript {{ scroll-margin-top: 3rem; }}  /* clear the sticky nav */
+details.transcript > summary {{ list-style: none; cursor: pointer; }}
+details.transcript > summary::-webkit-details-marker {{ display: none; }}
+details.transcript > summary h2 {{ display: inline-block; margin-top: 1.6rem; }}
+details.transcript > summary .unit-marker {{ display: inline-block; width: 0; height: 0;
+  margin: 0 0.6em 0.15em 0; border-left: 0.45em solid var(--transect-color-muted);
+  border-top: 0.3em solid transparent; border-bottom: 0.3em solid transparent;
+  vertical-align: middle; transition: transform 0.1s; }}
+details.transcript[open] > summary .unit-marker {{ transform: rotate(90deg); }}
+.lane-nav {{ position: sticky; top: 0; z-index: 20; background: #fff;
+  border-bottom: 1px solid var(--transect-color-border); padding: 6px 0;
+  margin: 0.5rem 0 1rem; display: flex; flex-wrap: wrap; gap: 6px;
+  align-items: center; }}
+.lane-nav a {{ font-size: 0.8rem; text-decoration: none; padding: 2px 9px;
+  border: 1px solid var(--transect-color-border); border-radius: 10px;
+  background: var(--transect-chip-bg); color: var(--transect-color-link); }}
+.lane-nav a:hover {{ background: var(--transect-color-hover); }}
+.lane-nav button {{ font-size: 0.75rem; margin-left: 4px; padding: 2px 8px;
+  border: 1px solid var(--transect-color-border); border-radius: 10px; background: #fff;
+  color: var(--transect-color-muted); cursor: pointer; }}
 .meta {{ color: var(--transect-color-muted); font-size: 0.85rem; }}
 /* chart how-to-read lines: one step below .meta, so explainers cede
    visual space to the charts they explain */

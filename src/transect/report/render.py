@@ -383,6 +383,12 @@ def render_report(
                 "heading": _transcript_title(one, my_info),
                 "run_meta": sections.run_intro_line(my_info),
                 "sections": sections_html,
+                # a multi-transcript report (epochs="all", several samples)
+                # opens its first unit; the rest sit collapsed behind the
+                # unit navigation until opened
+                "open": idx == 0,
+                "nav_label": _nav_label(one),
+                "anchor": f"unit-{idx}",
             }
         )
 
@@ -644,6 +650,11 @@ def _span_lanes(subagents: pd.DataFrame, main: pd.DataFrame) -> list[SpanGeometr
                 )
             )
     return spans
+
+
+def _nav_label(one: pd.DataFrame) -> str:
+    """A unit's navigation chip: sample id and epoch."""
+    return f"{one.sample_id.iloc[0]} · epoch {one.epoch.iloc[0]}"
 
 
 def _transcript_title(one: pd.DataFrame, info: pd.DataFrame) -> str:

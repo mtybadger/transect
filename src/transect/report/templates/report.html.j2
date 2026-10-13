@@ -21,12 +21,20 @@
     resolution for laptop-screen reading. -#}
 <p class="meta"><label title="Renders each chart at its full authored width (higher per-turn resolution) inside a horizontal scroll box, instead of scaling it down to fit the window."><input type="checkbox" id="transect-zoom-toggle" onchange="_transectApplyFit()"> zoomed-in charts (scroll horizontally)</label></p>
 {% if not transcripts %}<p>No transcripts in results.</p>{% endif %}
+{%- if transcripts|length > 1 %}
+{#- Unit navigation: one chip per report unit. A click opens that unit
+    and scrolls to it; the chips stay at the top of the viewport. -#}
+<nav class="lane-nav" aria-label="Report units">
+{%- for t in transcripts %}<a href="#{{ t.anchor }}" onclick="_transectOpenUnit('{{ t.anchor }}')">{{ t.nav_label }}</a>{% endfor %}
+<button type="button" onclick="_transectToggleUnits(true)">expand all</button><button type="button" onclick="_transectToggleUnits(false)">collapse all</button>
+</nav>
+{%- endif %}
 {% for t in transcripts %}
-<div class="transcript">
-<h2>{{ t.heading }}</h2>
+<details class="transcript" id="{{ t.anchor }}"{% if t.open %} open{% endif %}>
+<summary><span class="unit-marker" aria-hidden="true"></span><h2>{{ t.heading }}</h2></summary>
 {% if t.run_meta %}{{ t.run_meta }}{% endif %}
 {% for section in t.sections %}{{ section }}{% endfor %}
-</div>
+</details>
 {% endfor %}
 {% include "scan_status.html.j2" %}
 {#- Provenance footer: the mark, the producing package + version,
@@ -37,6 +45,27 @@
     screen. -#}
 <button id="transect-back-top" onclick="window.scrollTo({top: 0, behavior: 'smooth'})" title="Back to the top of the page">&uarr; Back to top</button>
 <script>
+// Report units (<details class="transcript">): the unit navigation opens
+// a unit before jumping to it; expand/collapse all toggles every unit.
+function _transectOpenUnit(id) {
+  var unit = document.getElementById(id);
+  if (unit && unit.tagName === "DETAILS") unit.open = true;
+}
+function _transectToggleUnits(open) {
+  document.querySelectorAll("details.transcript").forEach(function(d) { d.open = open; });
+  _transectQueueFit();
+}
+// a phase-card deep link into a collapsed unit opens the unit first
+function _transectOpenUnitOfHash() {
+  var hash = location.hash;
+  if (!hash) return;
+  var target = document.getElementById(hash.slice(1));
+  var unit = target && target.closest ? target.closest("details.transcript") : null;
+  if (unit) unit.open = true;
+}
+window.addEventListener("hashchange", _transectOpenUnitOfHash);
+document.addEventListener("DOMContentLoaded", _transectOpenUnitOfHash);
+
 // Band chunks link to their phase card (href target="_parent", ids
 // transcript-scoped "#phase-<idx>-<n>"). Fragment navigation scrolls;
 // this additionally opens the target <details> (native auto-open is

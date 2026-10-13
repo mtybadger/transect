@@ -55,13 +55,23 @@
 var _LAZY_LIVE = 6;
 var _transectVisibleFrames = new Set();
 var _transectLiveFrames = [];
+// The first chart document to load is never evicted while others are
+// live. inspect_viz's shared-runtime proposal (meridianlabs-ai/inspect_viz#41)
+// caches one DuckDB worker on the topmost window, owned by the first
+// document that initialised it; unloading that document kills the worker
+// for every other chart on the page. Pinning the owner costs one extra
+// live runtime and keeps the page correct under either runtime model.
+var _transectOwnerFrame = null;
 function _transectLoadFrame(frame) {
   if (frame.getAttribute("srcdoc")) return;
   frame.setAttribute("srcdoc", frame.getAttribute("data-transect-srcdoc"));
   frame.classList.remove("transect-lazy");
+  if (_transectOwnerFrame === null) _transectOwnerFrame = frame;
   _transectLiveFrames.push(frame);
-  while (_transectLiveFrames.length > _LAZY_LIVE) {
-    var idle = _transectLiveFrames.findIndex(function(f) { return !_transectVisibleFrames.has(f); });
+  while (_transectLiveFrames.length > _LAZY_LIVE + 1) {
+    var idle = _transectLiveFrames.findIndex(function(f) {
+      return f !== _transectOwnerFrame && !_transectVisibleFrames.has(f);
+    });
     if (idle < 0) break;
     var old = _transectLiveFrames.splice(idle, 1)[0];
     old.removeAttribute("srcdoc");
